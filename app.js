@@ -1,10 +1,71 @@
+const fs = require("fs");
+const path = require("path");
+const dotenv = require("dotenv");
+
 const express = require("express");
 const qrcode = require("qrcode-terminal");
 const axios = require("axios");
 const cors = require("cors");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 
-require("dotenv").config();
+// ============================================================
+// ENTORNO: DEVELOPMENT / PRODUCTION
+// ============================================================
+//
+// DESARROLLO:
+//   NODE_ENV=development
+//   Carga .env.development
+//
+// PRODUCCION / DOCKER:
+//   NODE_ENV=production
+//   Carga .env.production si existe.
+//   Si Docker ya inyectó las variables con env_file, se respetan.
+//
+// dotenv NO sobreescribe variables ya existentes.
+// ============================================================
+
+const NODE_ENV = String(
+  process.env.NODE_ENV || "development"
+)
+  .trim()
+  .toLowerCase();
+
+const ES_PRODUCCION = NODE_ENV === "production";
+
+const ARCHIVO_ENV_ESPERADO = ES_PRODUCCION
+  ? ".env.production"
+  : ".env.development";
+
+let archivoEntornoCargado = null;
+
+const rutaEnvEsperada = path.resolve(
+  process.cwd(),
+  ARCHIVO_ENV_ESPERADO
+);
+
+if (fs.existsSync(rutaEnvEsperada)) {
+  dotenv.config({
+    path: rutaEnvEsperada,
+    override: false,
+  });
+
+  archivoEntornoCargado = ARCHIVO_ENV_ESPERADO;
+} else if (!ES_PRODUCCION) {
+  // Compatibilidad temporal con el .env anterior en desarrollo.
+  const rutaEnvLegacy = path.resolve(
+    process.cwd(),
+    ".env"
+  );
+
+  if (fs.existsSync(rutaEnvLegacy)) {
+    dotenv.config({
+      path: rutaEnvLegacy,
+      override: false,
+    });
+
+    archivoEntornoCargado = ".env";
+  }
+}
 
 // ============================================================
 // CONFIGURACION
@@ -13,17 +74,42 @@ require("dotenv").config();
 const app = express();
 
 const PORT = Number(process.env.PORT || 3100);
+
 const TUVENDEDOR_API_URL = (
-  process.env.TUVENDEDOR_API_URL || "http://localhost:5151"
+  process.env.TUVENDEDOR_API_URL ||
+  (ES_PRODUCCION
+    ? "http://market_backend"
+    : "http://localhost:5151")
 ).replace(/\/$/, "");
-const TUVENDEDOR_INTERNAL_KEY = process.env.TUVENDEDOR_INTERNAL_KEY || "";
+
+const TUVENDEDOR_INTERNAL_KEY =
+  process.env.TUVENDEDOR_INTERNAL_KEY || "";
+
 const WHISPER_URL =
-  process.env.WHISPER_URL || "http://127.0.0.1:8001/transcribe";
+  process.env.WHISPER_URL ||
+  (ES_PRODUCCION
+    ? "http://tuvendedor_whisper:8001/transcribe"
+    : "http://127.0.0.1:8001/transcribe");
+
 const WA_HEADLESS =
   String(process.env.WA_HEADLESS ?? "true").toLowerCase() === "true";
 
-const BACKEND_TIMEOUT_MS = Number(process.env.BACKEND_TIMEOUT_MS || 130000);
-const WHISPER_TIMEOUT_MS = Number(process.env.WHISPER_TIMEOUT_MS || 120000);
+const WA_EXECUTABLE_PATH = String(
+  process.env.WA_EXECUTABLE_PATH ||
+    (ES_PRODUCCION ? "/usr/bin/chromium" : "")
+).trim();
+
+const WA_CLIENT_ID = String(
+  process.env.WA_CLIENT_ID || "tuvendedor-local"
+).trim();
+
+const BACKEND_TIMEOUT_MS = Number(
+  process.env.BACKEND_TIMEOUT_MS || 130000
+);
+
+const WHISPER_TIMEOUT_MS = Number(
+  process.env.WHISPER_TIMEOUT_MS || 120000
+);
 
 // Evita responder mensajes sincronizados durante el arranque, pero sin dejar
 // al bot "ciego" demasiado tiempo después de quedar listo.
@@ -131,7 +217,7 @@ function programarReinicio(motivo, demoraMs = 2500) {
 
 const client = new Client({
   authStrategy: new LocalAuth({
-    clientId: "tuvendedor-local",
+    clientId: WA_CLIENT_ID,
     rmMaxRetries: 30,
   }),
 

@@ -1,5 +1,7 @@
 services:
+
   tuvendedor_wa:
+
     build:
       context: .
       dockerfile: Dockerfile
@@ -7,21 +9,19 @@ services:
     container_name: tuvendedor_wa
 
     env_file:
-      - .env
+      - .env.production
 
     environment:
-      # Dentro de Docker NO usamos localhost para llegar al backend.
-      TUVENDEDOR_API_URL: http://market_backend
-      WA_HEADLESS: "true"
-      WA_EXECUTABLE_PATH: /usr/bin/chromium
+      NODE_ENV: production
 
-    # Persistencia REAL fuera del contenedor.
-    # Si el contenedor se elimina, la sesión de WhatsApp permanece en el VPS.
     volumes:
+
+      # SESIÓN DE WHATSAPP
       - /srv/tuvendedor/whatsapp/auth:/app/.wwebjs_auth
+
+      # CACHE
       - /srv/tuvendedor/whatsapp/cache:/app/.wwebjs_cache
 
-    # Solo accesible desde el propio VPS para diagnóstico.
     ports:
       - "127.0.0.1:3100:3100"
 
@@ -29,10 +29,16 @@ services:
       - ecommerce_network
 
     restart: unless-stopped
+
     init: true
+
     shm_size: "512mb"
 
+
 networks:
+
   ecommerce_network:
+
     external: true
+
     name: ecommerce_network
