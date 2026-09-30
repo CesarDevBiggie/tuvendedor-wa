@@ -2,10 +2,12 @@ FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-# Chromium y librerías necesarias para whatsapp-web.js / Puppeteer
+# Chromium para whatsapp-web.js/Puppeteer.
+# Git es necesario porque whatsapp-web.js se instala desde un repo GitHub.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        chromium \
+       git \
        ca-certificates \
        fonts-liberation \
        fonts-noto-color-emoji \

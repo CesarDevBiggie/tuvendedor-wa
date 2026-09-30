@@ -121,7 +121,25 @@ const TTL_MENSAJE_PROCESADO_MS = 60 * 60 * 1000;
 const VENTANA_REAUTENTICACION_MS = 30 * 1000;
 
 if (!TUVENDEDOR_INTERNAL_KEY) {
-  console.error("❌ Falta TUVENDEDOR_INTERNAL_KEY en .env");
+  console.error(
+    `❌ Falta TUVENDEDOR_INTERNAL_KEY para el entorno ${NODE_ENV}.`
+  );
+  console.error(
+    `   Configurá ${ARCHIVO_ENV_ESPERADO} o inyectá la variable desde Docker.`
+  );
+  process.exit(1);
+}
+
+if (
+  ES_PRODUCCION &&
+  /localhost|127\.0\.0\.1/i.test(TUVENDEDOR_API_URL)
+) {
+  console.error(
+    "❌ Configuración inválida: en producción TUVENDEDOR_API_URL no debe apuntar a localhost."
+  );
+  console.error(
+    "   Dentro de Docker usá: http://market_backend"
+  );
   process.exit(1);
 }
 
@@ -228,6 +246,11 @@ const client = new Client({
 
   puppeteer: {
     headless: WA_HEADLESS,
+
+    ...(WA_EXECUTABLE_PATH
+      ? { executablePath: WA_EXECUTABLE_PATH }
+      : {}),
+
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -805,8 +828,20 @@ app.get("/estado", (req, res) => {
 
 console.log("");
 console.log("🚀 Iniciando TuVendedor WhatsApp...");
+console.log(`🧭 Entorno: ${NODE_ENV}`);
+console.log(
+  `⚙️ Configuración: ${
+    archivoEntornoCargado || "variables del proceso/Docker"
+  }`
+);
 console.log(`🌐 Backend: ${TUVENDEDOR_API_URL}`);
 console.log(`🎙️ Whisper: ${WHISPER_URL}`);
+console.log(
+  `🌍 Chromium: ${
+    WA_EXECUTABLE_PATH || "administrado por Puppeteer"
+  }`
+);
+console.log(`💬 WhatsApp Client ID: ${WA_CLIENT_ID}`);
 console.log("🛡️ El bot sólo responderá mensajes entrantes individuales.");
 console.log("");
 
@@ -824,8 +859,14 @@ client.initialize().catch((error) => {
   );
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`🌐 Bridge escuchando en http://localhost:${PORT}`);
+const server = app.listen(PORT, "0.0.0.0", () => {
+  const hostLog = ES_PRODUCCION
+    ? "0.0.0.0"
+    : "localhost";
+
+  console.log(
+    `🌐 Bridge escuchando en http://${hostLog}:${PORT}`
+  );
 });
 
 // ============================================================

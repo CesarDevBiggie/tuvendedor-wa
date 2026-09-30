@@ -1,0 +1,12 @@
+.git
+.gitignore
+node_modules
+.env
+.env.*
+!.env.development.example
+!.env.production.example
+.wwebjs_auth
+.wwebjs_cache
+*.log
+npm-debug.log*
+README.md
