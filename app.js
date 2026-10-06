@@ -492,7 +492,7 @@ client.on("message", async (msg) => {
 
     try {
       await msg.reply(
-        "Disculpá 😊 tuve una demora al procesar tu mensaje. Podés enviármelo nuevamente y continuamos desde donde quedamos.",
+        'Un momentito 😊 Estoy revisando tu consulta. En breve seguimos desde donde quedamos 🙌'
       );
     } catch (replyError) {
       console.error(
