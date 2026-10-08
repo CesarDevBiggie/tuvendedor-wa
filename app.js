@@ -1,33 +1,52 @@
 const fs = require("fs");
+
 const path = require("path");
+
 const dotenv = require("dotenv");
 
 const express = require("express");
+
 const qrcode = require("qrcode-terminal");
+
 const axios = require("axios");
+
 const cors = require("cors");
+
 const { Client, LocalAuth } = require("whatsapp-web.js");
 
 // ============================================================
+
 // ENTORNO: DEVELOPMENT / PRODUCTION
-// ============================================================
-//
-// DESARROLLO:
-//   NODE_ENV=development
-//   Carga .env.development
-//
-// PRODUCCION / DOCKER:
-//   NODE_ENV=production
-//   Carga .env.production si existe.
-//   Si Docker ya inyectó las variables con env_file, se respetan.
-//
-// dotenv NO sobreescribe variables ya existentes.
+
 // ============================================================
 
-const NODE_ENV = String(
-  process.env.NODE_ENV || "development"
-)
+//
+
+// DESARROLLO:
+
+//   NODE_ENV=development
+
+//   Carga .env.development
+
+//
+
+// PRODUCCION / DOCKER:
+
+//   NODE_ENV=production
+
+//   Carga .env.production si existe.
+
+//   Si Docker ya inyectó las variables con env_file, se respetan.
+
+//
+
+// dotenv NO sobreescribe variables ya existentes.
+
+// ============================================================
+
+const NODE_ENV = String(process.env.NODE_ENV || "development")
   .trim()
+
   .toLowerCase();
 
 const ES_PRODUCCION = NODE_ENV === "production";
@@ -40,26 +59,31 @@ let archivoEntornoCargado = null;
 
 const rutaEnvEsperada = path.resolve(
   process.cwd(),
-  ARCHIVO_ENV_ESPERADO
+
+  ARCHIVO_ENV_ESPERADO,
 );
 
 if (fs.existsSync(rutaEnvEsperada)) {
   dotenv.config({
     path: rutaEnvEsperada,
+
     override: false,
   });
 
   archivoEntornoCargado = ARCHIVO_ENV_ESPERADO;
 } else if (!ES_PRODUCCION) {
   // Compatibilidad temporal con el .env anterior en desarrollo.
+
   const rutaEnvLegacy = path.resolve(
     process.cwd(),
-    ".env"
+
+    ".env",
   );
 
   if (fs.existsSync(rutaEnvLegacy)) {
     dotenv.config({
       path: rutaEnvLegacy,
+
       override: false,
     });
 
@@ -68,7 +92,9 @@ if (fs.existsSync(rutaEnvEsperada)) {
 }
 
 // ============================================================
+
 // CONFIGURACION
+
 // ============================================================
 
 const app = express();
@@ -77,13 +103,10 @@ const PORT = Number(process.env.PORT || 3100);
 
 const TUVENDEDOR_API_URL = (
   process.env.TUVENDEDOR_API_URL ||
-  (ES_PRODUCCION
-    ? "http://market_backend"
-    : "http://localhost:5151")
+  (ES_PRODUCCION ? "http://market_backend" : "http://localhost:5151")
 ).replace(/\/$/, "");
 
-const TUVENDEDOR_INTERNAL_KEY =
-  process.env.TUVENDEDOR_INTERNAL_KEY || "";
+const TUVENDEDOR_INTERNAL_KEY = process.env.TUVENDEDOR_INTERNAL_KEY || "";
 
 const WHISPER_URL =
   process.env.WHISPER_URL ||
@@ -95,71 +118,81 @@ const WA_HEADLESS =
   String(process.env.WA_HEADLESS ?? "true").toLowerCase() === "true";
 
 const WA_EXECUTABLE_PATH = String(
-  process.env.WA_EXECUTABLE_PATH ||
-    (ES_PRODUCCION ? "/usr/bin/chromium" : "")
+  process.env.WA_EXECUTABLE_PATH || (ES_PRODUCCION ? "/usr/bin/chromium" : ""),
 ).trim();
 
 const WA_CLIENT_ID = String(
-  process.env.WA_CLIENT_ID || "tuvendedor-local"
+  process.env.WA_CLIENT_ID || "tuvendedor-local",
 ).trim();
 
-const BACKEND_TIMEOUT_MS = Number(
-  process.env.BACKEND_TIMEOUT_MS || 130000
-);
+const BACKEND_TIMEOUT_MS = Number(process.env.BACKEND_TIMEOUT_MS || 130000);
 
-const WHISPER_TIMEOUT_MS = Number(
-  process.env.WHISPER_TIMEOUT_MS || 120000
-);
+const WHISPER_TIMEOUT_MS = Number(process.env.WHISPER_TIMEOUT_MS || 120000);
 
 // Evita responder mensajes sincronizados durante el arranque, pero sin dejar
+
 // al bot "ciego" demasiado tiempo después de quedar listo.
+
 const SEGUNDOS_GRACIA_READY = Number(process.env.WA_READY_GRACE_SECONDS || 2);
+
 const TTL_MENSAJE_PROCESADO_MS = 60 * 60 * 1000;
 
 // Ventana en la que un "Execution context was destroyed" es esperable porque
+
 // WhatsApp Web está navegando para volver a la pantalla de vinculación.
+
 const VENTANA_REAUTENTICACION_MS = 30 * 1000;
 
 if (!TUVENDEDOR_INTERNAL_KEY) {
   console.error(
-    `❌ Falta TUVENDEDOR_INTERNAL_KEY para el entorno ${NODE_ENV}.`
+    `❌ Falta TUVENDEDOR_INTERNAL_KEY para el entorno ${NODE_ENV}.`,
   );
+
   console.error(
-    `   Configurá ${ARCHIVO_ENV_ESPERADO} o inyectá la variable desde Docker.`
+    `   Configurá ${ARCHIVO_ENV_ESPERADO} o inyectá la variable desde Docker.`,
   );
+
   process.exit(1);
 }
 
-if (
-  ES_PRODUCCION &&
-  /localhost|127\.0\.0\.1/i.test(TUVENDEDOR_API_URL)
-) {
+if (ES_PRODUCCION && /localhost|127\.0\.0\.1/i.test(TUVENDEDOR_API_URL)) {
   console.error(
-    "❌ Configuración inválida: en producción TUVENDEDOR_API_URL no debe apuntar a localhost."
+    "❌ Configuración inválida: en producción TUVENDEDOR_API_URL no debe apuntar a localhost.",
   );
-  console.error(
-    "   Dentro de Docker usá: http://market_backend"
-  );
+
+  console.error("   Dentro de Docker usá: http://market_backend");
+
   process.exit(1);
 }
 
 app.use(cors());
+
 app.use(express.json({ limit: "25mb" }));
 
 // ============================================================
+
 // ESTADO
+
 // ============================================================
 
 let whatsappReady = false;
+
 let procesarMensajesDesde = null;
+
 let esperandoNuevaVinculacion = false;
+
 let ultimoLogoutEn = 0;
+
 let ultimoMotivoDesconexion = null;
+
 let ultimoLogDesconexionEn = 0;
+
 let reinicioProgramado = false;
+
 let cerrandoAplicacion = false;
 
 const PROCESO_INICIADO_EN = Math.floor(Date.now() / 1000);
+
 const mensajesProcesados = new Map();
 
 setInterval(
@@ -172,11 +205,14 @@ setInterval(
       }
     }
   },
+
   10 * 60 * 1000,
 ).unref();
 
 // ============================================================
+
 // HELPERS DE RECUPERACION
+
 // ============================================================
 
 function esErrorContextoNavegacion(error) {
@@ -214,14 +250,21 @@ function programarReinicio(motivo, demoraMs = 2500) {
   }
 
   reinicioProgramado = true;
+
   whatsappReady = false;
+
   procesarMensajesDesde = null;
 
   console.error("");
+
   console.error("============================================");
+
   console.error("🔄 REINICIO NECESARIO");
+
   console.error("Motivo:", motivo);
+
   console.error("============================================");
+
   console.error("");
 
   setTimeout(() => {
@@ -230,35 +273,46 @@ function programarReinicio(motivo, demoraMs = 2500) {
 }
 
 // ============================================================
+
 // WHATSAPP CLIENT
+
 // ============================================================
 
 const client = new Client({
   authStrategy: new LocalAuth({
     clientId: WA_CLIENT_ID,
+
     rmMaxRetries: 30,
   }),
 
   // Si WhatsApp Web entra en conflicto con otra pestaña/sesión web,
+
   // esta instancia intenta conservar el control.
+
   takeoverOnConflict: true,
+
   takeoverTimeoutMs: 5000,
 
   puppeteer: {
     headless: WA_HEADLESS,
 
-    ...(WA_EXECUTABLE_PATH
-      ? { executablePath: WA_EXECUTABLE_PATH }
-      : {}),
+    ...(WA_EXECUTABLE_PATH ? { executablePath: WA_EXECUTABLE_PATH } : {}),
 
     args: [
       "--no-sandbox",
+
       "--disable-setuid-sandbox",
+
       "--disable-dev-shm-usage",
+
       "--no-first-run",
+
       "--no-default-browser-check",
+
       "--disable-background-timer-throttling",
+
       "--disable-backgrounding-occluded-windows",
+
       "--disable-renderer-backgrounding",
     ],
   },
@@ -266,14 +320,21 @@ const client = new Client({
 
 client.on("qr", (qr) => {
   whatsappReady = false;
+
   procesarMensajesDesde = null;
+
   esperandoNuevaVinculacion = true;
 
   console.log("");
+
   console.log("============================================");
+
   console.log("📱 QR GENERADO");
+
   console.log("Escanealo desde WhatsApp > Dispositivos vinculados");
+
   console.log("============================================");
+
   console.log("");
 
   qrcode.generate(qr, { small: true });
@@ -281,6 +342,7 @@ client.on("qr", (qr) => {
 
 client.on("authenticated", () => {
   esperandoNuevaVinculacion = false;
+
   console.log("✅ WHATSAPP AUTENTICADO");
 });
 
@@ -290,70 +352,104 @@ client.on("loading_screen", (percent, message) => {
 
 client.on("ready", () => {
   whatsappReady = true;
+
   esperandoNuevaVinculacion = false;
+
   ultimoMotivoDesconexion = null;
+
   reinicioProgramado = false;
 
   procesarMensajesDesde = Math.floor(Date.now() / 1000) + SEGUNDOS_GRACIA_READY;
 
   console.log("");
+
   console.log("============================================");
+
   console.log("✅ WHATSAPP LISTO");
+
   console.log(`🌐 Backend: ${TUVENDEDOR_API_URL}`);
+
   console.log(`🎙️ Whisper: ${WHISPER_URL}`);
+
   console.log("🛡️ Solo responde mensajes entrantes individuales");
+
   console.log("🛡️ Grupos/estados/broadcast ignorados");
+
   console.log("🛡️ Mensajes propios e históricos ignorados");
+
   console.log("============================================");
+
   console.log("");
 });
 
 client.on("auth_failure", (msg) => {
   whatsappReady = false;
+
   procesarMensajesDesde = null;
+
   esperandoNuevaVinculacion = true;
 
   console.error("❌ ERROR DE AUTENTICACION WHATSAPP");
+
   console.error(msg);
+
   console.error("📱 Se esperará una nueva vinculación por QR.");
 });
 
 client.on("disconnected", (reason) => {
   whatsappReady = false;
+
   procesarMensajesDesde = null;
 
   const motivo = String(reason || "DESCONOCIDO");
+
   const ahora = Date.now();
 
   // whatsapp-web.js puede emitir LOGOUT más de una vez durante la misma
+
   // navegación. Evitamos ensuciar el log y, sobre todo, evitamos programar
+
   // varios cierres/reinicios a la vez.
+
   const desconexionDuplicada =
     ultimoMotivoDesconexion === motivo && ahora - ultimoLogDesconexionEn < 3000;
 
   ultimoMotivoDesconexion = motivo;
+
   ultimoLogDesconexionEn = ahora;
 
   if (!desconexionDuplicada) {
     console.log("");
+
     console.log("============================================");
+
     console.log("⚠️ WHATSAPP DESCONECTADO");
+
     console.log("Motivo:", motivo);
+
     console.log("============================================");
+
     console.log("");
   }
 
   if (motivo.toUpperCase() === "LOGOUT") {
     // IMPORTANTE:
+
     // Si el usuario elimina el dispositivo desde el celular, LocalAuth queda
+
     // invalidado. La propia librería navega nuevamente al flujo de QR.
+
     // NO cerramos Node aquí: dejamos que aparezca el QR y se vuelva a vincular.
+
     ultimoLogoutEn = ahora;
+
     esperandoNuevaVinculacion = true;
 
     if (!desconexionDuplicada) {
       console.log("📱 La sesión fue cerrada desde WhatsApp.");
+
       console.log("⏳ Esperando que WhatsApp genere un nuevo QR...");
+
       console.log("");
     }
 
@@ -361,24 +457,35 @@ client.on("disconnected", (reason) => {
   }
 
   // Para desconexiones reales distintas de LOGOUT, levantamos una instancia
+
   // limpia. Más adelante PM2 será quien la inicie automáticamente.
+
   programarReinicio(`WhatsApp desconectado: ${motivo}`, 3000);
 });
 
 // ============================================================
+
 // MENSAJES ENTRANTES
+
 // ============================================================
 
 client.on("message", async (msg) => {
   const textoOriginal = String(msg.body || "").trim();
 
   console.log("");
+
   console.log("============================================");
+
   console.log("📩 MENSAJE ENTRANTE");
+
   console.log("De:", msg.from);
+
   console.log("Tipo:", msg.type);
+
   console.log("Timestamp:", msg.timestamp);
+
   console.log("Texto:", textoOriginal);
+
   console.log("============================================");
 
   if (!debeProcesarse(msg)) {
@@ -389,6 +496,7 @@ client.on("message", async (msg) => {
 
   if (idMensaje && mensajesProcesados.has(idMensaje)) {
     console.log("⏭️ Ignorado: mensaje duplicado.");
+
     return;
   }
 
@@ -397,9 +505,9 @@ client.on("message", async (msg) => {
   }
 
   try {
-    const telefono = await obtenerIdentificadorCliente(msg);
+    const identidad = await obtenerIdentidadCliente(msg);
 
-    if (!telefono) {
+    if (!identidad.identificador) {
       console.log("⏭️ No se pudo identificar al cliente.");
       return;
     }
@@ -408,13 +516,21 @@ client.on("message", async (msg) => {
 
     if (!entrada) {
       console.log(`⏭️ Tipo ${msg.type} no soportado.`);
+
       return;
     }
 
     const idPublicacion = extraerIdPublicacion(entrada.mensaje);
 
     const payload = {
-      telefono,
+      // Identificador estable de la conversación. Puede ser un LID.
+      // El backend lo utiliza para conservar el contexto de la conversación.
+      telefono: identidad.identificador,
+
+      // Datos comerciales reales del contacto.
+      numeroWhatsapp: identidad.numeroWhatsapp ?? null,
+      nombreContacto: identidad.nombreContacto ?? null,
+
       mensaje: entrada.mensaje,
       idPublicacion: idPublicacion ?? null,
       tipoMensaje: entrada.tipoMensaje,
@@ -423,7 +539,15 @@ client.on("message", async (msg) => {
       mediaNombre: entrada.mediaNombre ?? null,
     };
 
-    console.log("👤 Cliente:", telefono);
+    console.log("👤 Identificador conversación:", identidad.identificador);
+    console.log(
+      "📱 Teléfono real:",
+      identidad.numeroWhatsapp || "(no resuelto)",
+    );
+    console.log(
+      "🪪 Nombre WhatsApp:",
+      identidad.nombreContacto || "(sin nombre)",
+    );
     console.log("📨 Tipo backend:", payload.tipoMensaje);
 
     if (entrada.transcripcion) {
@@ -434,69 +558,90 @@ client.on("message", async (msg) => {
 
     const response = await axios.post(
       `${TUVENDEDOR_API_URL}/api/ia/motos/conversacion`,
+
       payload,
+
       {
         headers: {
           "Content-Type": "application/json",
+
           "X-TuVendedor-Internal-Key": TUVENDEDOR_INTERNAL_KEY,
         },
+
         timeout: BACKEND_TIMEOUT_MS,
+
         maxBodyLength: Infinity,
+
         maxContentLength: Infinity,
       },
     );
 
     const body = response.data;
+
     const data = body?.Data ?? body?.data;
+
     const respuesta = data?.respuesta ?? data?.Respuesta;
 
     // Modo HUMANO: backend puede devolver vacío.
+
     if (!respuesta || !String(respuesta).trim()) {
       console.log("ℹ️ Backend no indicó respuesta automática.");
+
       return;
     }
 
     console.log("🤖 Panambí:", respuesta);
 
     // Verificamos otra vez el estado porque el backend puede tardar y WhatsApp
+
     // podría haberse desconectado durante esa espera.
+
     if (!whatsappReady) {
       console.log(
         "⚠️ La respuesta quedó lista, pero WhatsApp se desconectó antes de enviarla.",
       );
+
       return;
     }
 
     await msg.reply(String(respuesta));
+
     console.log("✅ Respuesta enviada al cliente que escribió.");
   } catch (error) {
     console.error("❌ ERROR PROCESANDO MENSAJE");
 
     if (error.response) {
       console.error("HTTP:", error.response.status);
+
       console.error("Backend:", error.response.data);
     } else {
       console.error("Código:", error?.code ?? "(sin código)");
+
       console.error("Mensaje:", error?.message ?? String(error));
+
       console.error("Stack:", error?.stack ?? "(sin stack disponible)");
     }
 
     // Si el error fue provocado por una navegación/desconexión de WhatsApp,
+
     // no intentamos responder usando un contexto de Chromium ya destruido.
+
     if (!whatsappReady || esErrorContextoNavegacion(error)) {
       console.log(
         "ℹ️ No se envía contingencia porque WhatsApp está reconectando.",
       );
+
       return;
     }
 
     try {
       await msg.reply(
-        'Un momentito 😊 Estoy revisando tu consulta. En breve seguimos desde donde quedamos 🙌'
+        "Un momentito 😊 Estoy revisando tu consulta. En breve seguimos desde donde quedamos 🙌",
       );
     } catch (replyError) {
       console.error(
         "❌ No se pudo enviar contingencia:",
+
         replyError?.message || String(replyError),
       );
     }
@@ -504,7 +649,9 @@ client.on("message", async (msg) => {
 });
 
 // ============================================================
+
 // CONSTRUIR ENTRADA PARA BACKEND
+
 // ============================================================
 
 async function construirEntradaBackend(msg, textoOriginal) {
@@ -515,6 +662,7 @@ async function construirEntradaBackend(msg, textoOriginal) {
 
     return {
       tipoMensaje: "TEXTO",
+
       mensaje: textoOriginal,
     };
   }
@@ -534,7 +682,9 @@ async function construirEntradaBackend(msg, textoOriginal) {
 
     return {
       tipoMensaje: "AUDIO",
+
       mensaje: transcripcion,
+
       transcripcion,
     };
   }
@@ -548,9 +698,13 @@ async function construirEntradaBackend(msg, textoOriginal) {
 
     return {
       tipoMensaje: "IMAGEN",
+
       mensaje: textoOriginal,
+
       mediaBase64: media.data,
+
       mediaMimeType: media.mimetype,
+
       mediaNombre: media.filename || `imagen_${Date.now()}`,
     };
   }
@@ -564,9 +718,13 @@ async function construirEntradaBackend(msg, textoOriginal) {
 
     return {
       tipoMensaje: "DOCUMENTO",
+
       mensaje: textoOriginal,
+
       mediaBase64: media.data,
+
       mediaMimeType: media.mimetype,
+
       mediaNombre: media.filename || `documento_${Date.now()}`,
     };
   }
@@ -575,7 +733,9 @@ async function construirEntradaBackend(msg, textoOriginal) {
 }
 
 // ============================================================
+
 // WHISPER LOCAL
+
 // ============================================================
 
 async function transcribirAudio(media) {
@@ -583,13 +743,18 @@ async function transcribirAudio(media) {
 
   const response = await axios.post(
     WHISPER_URL,
+
     {
       data: media.data,
+
       mimetype: media.mimetype || "audio/ogg",
     },
+
     {
       timeout: WHISPER_TIMEOUT_MS,
+
       maxBodyLength: Infinity,
+
       maxContentLength: Infinity,
     },
   );
@@ -598,17 +763,21 @@ async function transcribirAudio(media) {
 }
 
 // ============================================================
+
 // FILTROS DE SEGURIDAD
+
 // ============================================================
 
 function debeProcesarse(msg) {
   if (!whatsappReady) {
     console.log("⏭️ Ignorado: WhatsApp aún no está listo.");
+
     return false;
   }
 
   if (!procesarMensajesDesde) {
     console.log("⏭️ Ignorado: protección inicial activa.");
+
     return false;
   }
 
@@ -616,6 +785,7 @@ function debeProcesarse(msg) {
 
   if (ahora < procesarMensajesDesde) {
     console.log("⏭️ Ignorado: sincronización inicial.");
+
     return false;
   }
 
@@ -625,39 +795,49 @@ function debeProcesarse(msg) {
       msg.timestamp < procesarMensajesDesde)
   ) {
     console.log("⏭️ Ignorado: mensaje histórico.");
+
     return false;
   }
 
   if (msg.fromMe) {
     console.log("⏭️ Ignorado: mensaje propio.");
+
     return false;
   }
 
   if (!msg.from) {
     console.log("⏭️ Ignorado: sin remitente.");
+
     return false;
   }
 
   if (msg.from.endsWith("@g.us")) {
     console.log("⏭️ Ignorado: mensaje de grupo.");
+
     return false;
   }
 
   if (msg.from === "status@broadcast" || msg.from.includes("@broadcast")) {
     console.log("⏭️ Ignorado: estado/broadcast.");
+
     return false;
   }
 
   const tiposPermitidos = new Set([
     "chat",
+
     "ptt",
+
     "audio",
+
     "image",
+
     "document",
   ]);
 
   if (!tiposPermitidos.has(msg.type)) {
     console.log(`⏭️ Ignorado: tipo ${msg.type}.`);
+
     return false;
   }
 
@@ -665,7 +845,9 @@ function debeProcesarse(msg) {
 }
 
 // ============================================================
+
 // COMPATIBILIDAD WHATSAPP WEB 2.3000.x / CHATS @lid
+
 // ============================================================
 
 function asegurarIdSerializadoMensaje(msg) {
@@ -695,6 +877,7 @@ function asegurarIdSerializadoMensaje(msg) {
     try {
       msg.id = {
         ...id,
+
         _serialized: serializado,
       };
     } catch {
@@ -712,7 +895,9 @@ async function descargarMediaSeguro(msg, tipo) {
 
   if (!serializado) {
     console.error("❌ No se pudo reconstruir el ID serializado del mensaje.");
+
     console.error("ID recibido:", JSON.stringify(msg?.id ?? null));
+
     throw new Error(
       "No se pudo identificar el mensaje multimedia de WhatsApp.",
     );
@@ -728,17 +913,23 @@ async function descargarMediaSeguro(msg, tipo) {
     const bytesAprox = Math.floor((media.data.length * 3) / 4);
 
     console.log(`✅ Media ${tipo} descargada desde WhatsApp`);
+
     console.log("📦 MIME:", media.mimetype || "(sin MIME)");
+
     console.log(
       "📦 Tamaño aproximado:",
+
       `${(bytesAprox / 1024 / 1024).toFixed(2)} MB`,
     );
 
     return media;
   } catch (error) {
     console.error(`❌ downloadMedia falló para ${tipo}`);
+
     console.error("ID recibido:", JSON.stringify(msg?.id ?? null));
+
     console.error("Error:", error?.stack || error?.message || String(error));
+
     throw error;
   }
 }
@@ -751,28 +942,104 @@ function obtenerIdMensaje(msg) {
   }
 }
 
-async function obtenerIdentificadorCliente(msg) {
+function normalizarNumeroWhatsapp(valor) {
+  if (!valor) {
+    return null;
+  }
+
+  const numero = String(valor)
+    .replace("@c.us", "")
+    .replace("@s.whatsapp.net", "")
+    .replace(/\D/g, "");
+
+  return numero || null;
+}
+
+function normalizarIdentificadorWhatsapp(valor) {
+  if (!valor) {
+    return null;
+  }
+
+  return (
+    String(valor)
+      .replace("@c.us", "")
+      .replace("@s.whatsapp.net", "")
+      .replace("@lid", "")
+      .trim() || null
+  );
+}
+
+async function resolverTelefonoRealDesdeLid(idWhatsapp) {
+  if (!idWhatsapp || !String(idWhatsapp).endsWith("@lid")) {
+    return null;
+  }
+
+  if (typeof client.getContactLidAndPhone !== "function") {
+    console.log(
+      "⚠️ whatsapp-web.js no expone getContactLidAndPhone(); el teléfono real quedará pendiente.",
+    );
+    return null;
+  }
+
   try {
-    const contacto = await msg.getContact();
+    const resultado = await client.getContactLidAndPhone([String(idWhatsapp)]);
 
-    if (contacto?.number) {
-      const numero = String(contacto.number).replace(/\D/g, "");
-
-      if (numero) {
-        return numero;
-      }
-    }
+    return normalizarNumeroWhatsapp(resultado?.[0]?.pn ?? null);
   } catch (error) {
     console.log(
-      "ℹ️ No se pudo obtener contact.number:",
+      "ℹ️ No se pudo resolver LID -> teléfono:",
+      error?.message || String(error),
+    );
+
+    return null;
+  }
+}
+
+async function obtenerIdentidadCliente(msg) {
+  const idWhatsapp = String(msg.from || "").trim();
+
+  const identificador = normalizarIdentificadorWhatsapp(idWhatsapp);
+
+  let numeroWhatsapp = null;
+  let nombreContacto = null;
+
+  // Cuando WhatsApp entrega directamente @c.us/@s.whatsapp.net,
+  // ese valor sí contiene el número real.
+  if (idWhatsapp.endsWith("@c.us") || idWhatsapp.endsWith("@s.whatsapp.net")) {
+    numeroWhatsapp = normalizarNumeroWhatsapp(idWhatsapp);
+  }
+
+  let contacto = null;
+
+  try {
+    contacto = await msg.getContact();
+
+    nombreContacto =
+      contacto?.pushname || contacto?.name || contacto?.shortName || null;
+  } catch (error) {
+    console.log(
+      "ℹ️ No se pudo obtener el contacto de WhatsApp:",
       error?.message || String(error),
     );
   }
 
-  return String(msg.from || "")
-    .replace("@c.us", "")
-    .replace("@lid", "")
-    .trim();
+  // Si NO es @lid, contact.number sigue siendo una fuente válida.
+  // Para @lid no lo usamos como teléfono porque puede contener el mismo LID.
+  if (!numeroWhatsapp && !idWhatsapp.endsWith("@lid") && contacto?.number) {
+    numeroWhatsapp = normalizarNumeroWhatsapp(contacto.number);
+  }
+
+  // Para chats modernos @lid resolvemos expresamente LID -> PN.
+  if (!numeroWhatsapp && idWhatsapp.endsWith("@lid")) {
+    numeroWhatsapp = await resolverTelefonoRealDesdeLid(idWhatsapp);
+  }
+
+  return {
+    identificador,
+    numeroWhatsapp,
+    nombreContacto,
+    idWhatsapp,
+  };
 }
 
 function extraerIdPublicacion(texto) {
@@ -781,7 +1048,9 @@ function extraerIdPublicacion(texto) {
   }
 
   // Soporta enlaces/rutas que contengan share/producto/123, producto/123
+
   // y referencias simples TV-123.
+
   const match = String(texto).match(
     /(?:share\/producto\/|producto\/|TV-)(\d+)/i,
   );
@@ -791,20 +1060,115 @@ function extraerIdPublicacion(texto) {
   }
 
   const id = Number(match[1]);
+
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
 // ============================================================
+// RESOLVER TELEFONOS REALES DE CHATS @lid
+// DIAGNOSTICO / NORMALIZACION HISTORICA
+// ============================================================
+
+app.get("/resolver-telefonos", async (req, res) => {
+  const key = String(req.headers["x-tuvendedor-internal-key"] || "");
+
+  if (!TUVENDEDOR_INTERNAL_KEY || key !== TUVENDEDOR_INTERNAL_KEY) {
+    return res.status(401).json({
+      success: false,
+      message: "No autorizado.",
+    });
+  }
+
+  if (!whatsappReady) {
+    return res.status(503).json({
+      success: false,
+      message: "WhatsApp todavía no está listo.",
+    });
+  }
+
+  if (typeof client.getContactLidAndPhone !== "function") {
+    return res.status(501).json({
+      success: false,
+      message:
+        "La versión instalada de whatsapp-web.js no soporta getContactLidAndPhone().",
+    });
+  }
+
+  try {
+    const chats = await client.getChats();
+
+    const lids = [
+      ...new Set(
+        chats
+          .map((chat) => chat?.id?._serialized)
+          .filter((id) => id && String(id).endsWith("@lid")),
+      ),
+    ];
+
+    const data = [];
+    const TAMANO_LOTE = 10;
+
+    for (let i = 0; i < lids.length; i += TAMANO_LOTE) {
+      const lote = lids.slice(i, i + TAMANO_LOTE);
+
+      try {
+        const resultado = await client.getContactLidAndPhone(lote);
+
+        for (const item of resultado || []) {
+          const identificadorExterno = normalizarIdentificadorWhatsapp(
+            item?.lid,
+          );
+
+          const telefono = normalizarNumeroWhatsapp(item?.pn);
+
+          if (identificadorExterno && telefono) {
+            data.push({
+              identificadorExterno,
+              telefono,
+            });
+          }
+        }
+      } catch (errorLote) {
+        console.log(
+          "ℹ️ Lote LID no resuelto:",
+          errorLote?.message || String(errorLote),
+        );
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      cantidad: data.length,
+      data,
+    });
+  } catch (error) {
+    console.error("❌ Error resolviendo teléfonos:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error?.message || "No se pudieron resolver los teléfonos.",
+    });
+  }
+});
+
+// ============================================================
+
 // DIAGNOSTICO
+
 // ============================================================
 
 app.get("/", (req, res) => {
   res.status(200).json({
     servicio: "TuVendedor WhatsApp Bridge",
+
     whatsappReady,
+
     esperandoNuevaVinculacion,
+
     ultimoMotivoDesconexion,
+
     backend: TUVENDEDOR_API_URL,
+
     whisper: WHISPER_URL,
   });
 });
@@ -812,37 +1176,53 @@ app.get("/", (req, res) => {
 app.get("/estado", (req, res) => {
   res.status(200).json({
     whatsappReady,
+
     esperandoNuevaVinculacion,
+
     numero: client.info?.wid?._serialized ?? null,
+
     nombre: client.info?.pushname ?? null,
+
     backend: TUVENDEDOR_API_URL,
+
     whisper: WHISPER_URL,
+
     mensajesProcesados: mensajesProcesados.size,
+
     ultimoMotivoDesconexion,
   });
 });
 
 // ============================================================
+
 // INICIAR
+
 // ============================================================
 
 console.log("");
+
 console.log("🚀 Iniciando TuVendedor WhatsApp...");
+
 console.log(`🧭 Entorno: ${NODE_ENV}`);
+
 console.log(
   `⚙️ Configuración: ${
     archivoEntornoCargado || "variables del proceso/Docker"
-  }`
+  }`,
 );
+
 console.log(`🌐 Backend: ${TUVENDEDOR_API_URL}`);
+
 console.log(`🎙️ Whisper: ${WHISPER_URL}`);
+
 console.log(
-  `🌍 Chromium: ${
-    WA_EXECUTABLE_PATH || "administrado por Puppeteer"
-  }`
+  `🌍 Chromium: ${WA_EXECUTABLE_PATH || "administrado por Puppeteer"}`,
 );
+
 console.log(`💬 WhatsApp Client ID: ${WA_CLIENT_ID}`);
+
 console.log("🛡️ El bot sólo responderá mensajes entrantes individuales.");
+
 console.log("");
 
 client.initialize().catch((error) => {
@@ -850,27 +1230,27 @@ client.initialize().catch((error) => {
     console.log(
       "ℹ️ WhatsApp cambió de pantalla durante la re-vinculación; esperando QR/ready...",
     );
+
     return;
   }
 
   console.error("❌ Error inicializando WhatsApp:", error);
+
   programarReinicio(
     `Error inicializando WhatsApp: ${error?.message || String(error)}`,
   );
 });
 
 const server = app.listen(PORT, "0.0.0.0", () => {
-  const hostLog = ES_PRODUCCION
-    ? "0.0.0.0"
-    : "localhost";
+  const hostLog = ES_PRODUCCION ? "0.0.0.0" : "localhost";
 
-  console.log(
-    `🌐 Bridge escuchando en http://${hostLog}:${PORT}`
-  );
+  console.log(`🌐 Bridge escuchando en http://${hostLog}:${PORT}`);
 });
 
 // ============================================================
+
 // CIERRE LIMPIO DEL PROCESO
+
 // ============================================================
 
 async function cerrarAplicacion(signal) {
@@ -879,18 +1259,25 @@ async function cerrarAplicacion(signal) {
   }
 
   cerrandoAplicacion = true;
+
   whatsappReady = false;
+
   procesarMensajesDesde = null;
 
   console.log("");
+
   console.log("============================================");
+
   console.log(`🛑 Cerrando TuVendedor WhatsApp (${signal})`);
+
   console.log("============================================");
+
   console.log("");
 
   try {
     await new Promise((resolve) => {
       server.close(() => resolve());
+
       setTimeout(resolve, 1500).unref();
     });
   } catch {
@@ -899,12 +1286,16 @@ async function cerrarAplicacion(signal) {
 
   try {
     // destroy() cierra Chromium pero conserva LocalAuth.
+
     // NO usamos logout() aquí porque logout elimina la sesión.
+
     await client.destroy();
+
     console.log("✅ Cliente WhatsApp cerrado correctamente.");
   } catch (error) {
     console.log(
       "⚠️ El cliente WhatsApp ya estaba cerrado:",
+
       error?.message || String(error),
     );
   }
@@ -923,41 +1314,59 @@ process.on("SIGTERM", () => {
 });
 
 // ============================================================
+
 // PROTECCION PARA PUPPETEER / LOCALAUTH EN WINDOWS
+
 // ============================================================
 
 process.on("unhandledRejection", (reason) => {
   const mensaje = String(reason?.message || reason || "");
 
   // Durante LOGOUT la propia librería navega de la sesión anterior a la
+
   // pantalla de QR. Puppeteer puede reportar que el contexto anterior fue
+
   // destruido. En ese escenario NO debemos matar el proceso porque justamente
+
   // necesitamos que permanezca vivo para mostrar el nuevo QR.
+
   if (esErrorContextoNavegacion(reason) && estamosEnReautenticacion()) {
     console.log("");
+
     console.log(
       "ℹ️ Navegación interna de WhatsApp durante re-vinculación; se continúa esperando el QR.",
     );
+
     console.log("");
+
     return;
   }
 
   console.error("");
+
   console.error("❌ UNHANDLED REJECTION");
+
   console.error(mensaje);
+
   console.error("");
 
   if (esErrorLocalAuthBloqueado(reason)) {
     console.error("⚠️ Windows mantiene bloqueado un archivo de LocalAuth.");
+
     programarReinicio("Archivo LocalAuth bloqueado por Windows (EBUSY)", 3000);
+
     return;
   }
 
   if (esErrorContextoNavegacion(reason)) {
     // Fuera de un logout/re-vinculación, este error suele indicar que Chromium
+
     // navegó o perdió el contexto inesperadamente. Reiniciar es más seguro que
+
     // dejar un proceso aparentemente vivo pero incapaz de recibir mensajes.
+
     programarReinicio("Chromium perdió el contexto de WhatsApp Web", 2500);
+
     return;
   }
 
@@ -969,20 +1378,27 @@ process.on("uncaughtException", (error) => {
 
   if (esErrorContextoNavegacion(error) && estamosEnReautenticacion()) {
     console.log("");
+
     console.log(
       "ℹ️ Navegación interna de WhatsApp durante re-vinculación; proceso conservado.",
     );
+
     console.log("");
+
     return;
   }
 
   console.error("");
+
   console.error("❌ ERROR NO CONTROLADO");
+
   console.error(error);
+
   console.error("");
 
   if (esErrorLocalAuthBloqueado(error)) {
     programarReinicio("Archivo LocalAuth bloqueado por Windows (EBUSY)", 3000);
+
     return;
   }
 
