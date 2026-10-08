@@ -969,6 +969,71 @@ function normalizarIdentificadorWhatsapp(valor) {
   );
 }
 
+function telefonoPareceReal(numero, identificador) {
+  const limpio = normalizarNumeroWhatsapp(numero);
+
+  if (!limpio) {
+    return false;
+  }
+
+  if (limpio.length < 8 || limpio.length > 15) {
+    return false;
+  }
+
+  const esLid = String(identificador || "").endsWith("@lid");
+
+  const idLimpio = normalizarIdentificadorWhatsapp(identificador);
+
+  if (esLid && idLimpio && limpio === idLimpio) {
+    return false;
+  }
+
+  return true;
+}
+
+async function resolverTelefonoDesdeContacto(contacto, identificador) {
+  if (!contacto) {
+    return null;
+  }
+
+  const idContacto = String(contacto?.id?._serialized || "").trim();
+
+  if (idContacto.endsWith("@c.us") || idContacto.endsWith("@s.whatsapp.net")) {
+    const numero = normalizarNumeroWhatsapp(idContacto);
+
+    if (telefonoPareceReal(numero, identificador)) {
+      return numero;
+    }
+  }
+
+  if (contacto?.number) {
+    const numero = normalizarNumeroWhatsapp(contacto.number);
+
+    if (telefonoPareceReal(numero, identificador)) {
+      return numero;
+    }
+  }
+
+  if (typeof contacto.getFormattedNumber === "function") {
+    try {
+      const formateado = await contacto.getFormattedNumber();
+
+      const numero = normalizarNumeroWhatsapp(formateado);
+
+      if (telefonoPareceReal(numero, identificador)) {
+        return numero;
+      }
+    } catch (error) {
+      console.log(
+        "ℹ️ No se pudo obtener número formateado:",
+        error?.message || String(error),
+      );
+    }
+  }
+
+  return null;
+}
+
 async function resolverTelefonoRealDesdeLid(idWhatsapp) {
   if (!idWhatsapp || !String(idWhatsapp).endsWith("@lid")) {
     return null;
@@ -981,18 +1046,29 @@ async function resolverTelefonoRealDesdeLid(idWhatsapp) {
     return null;
   }
 
-  try {
-    const resultado = await client.getContactLidAndPhone([String(idWhatsapp)]);
+  const candidatos = [
+    String(idWhatsapp),
+    normalizarIdentificadorWhatsapp(idWhatsapp),
+  ].filter(Boolean);
 
-    return normalizarNumeroWhatsapp(resultado?.[0]?.pn ?? null);
-  } catch (error) {
-    console.log(
-      "ℹ️ No se pudo resolver LID -> teléfono:",
-      error?.message || String(error),
-    );
+  for (const candidato of candidatos) {
+    try {
+      const resultado = await client.getContactLidAndPhone([candidato]);
 
-    return null;
+      const numero = normalizarNumeroWhatsapp(resultado?.[0]?.pn ?? null);
+
+      if (telefonoPareceReal(numero, idWhatsapp)) {
+        return numero;
+      }
+    } catch (error) {
+      console.log(
+        `ℹ️ LID -> teléfono no resuelto con ${candidato}:`,
+        error?.message || String(error),
+      );
+    }
   }
+
+  return null;
 }
 
 async function obtenerIdentidadCliente(msg) {
@@ -1002,13 +1078,6 @@ async function obtenerIdentidadCliente(msg) {
 
   let numeroWhatsapp = null;
   let nombreContacto = null;
-
-  // Cuando WhatsApp entrega directamente @c.us/@s.whatsapp.net,
-  // ese valor sí contiene el número real.
-  if (idWhatsapp.endsWith("@c.us") || idWhatsapp.endsWith("@s.whatsapp.net")) {
-    numeroWhatsapp = normalizarNumeroWhatsapp(idWhatsapp);
-  }
-
   let contacto = null;
 
   try {
@@ -1016,6 +1085,8 @@ async function obtenerIdentidadCliente(msg) {
 
     nombreContacto =
       contacto?.pushname || contacto?.name || contacto?.shortName || null;
+
+    numeroWhatsapp = await resolverTelefonoDesdeContacto(contacto, idWhatsapp);
   } catch (error) {
     console.log(
       "ℹ️ No se pudo obtener el contacto de WhatsApp:",
@@ -1023,13 +1094,17 @@ async function obtenerIdentidadCliente(msg) {
     );
   }
 
-  // Si NO es @lid, contact.number sigue siendo una fuente válida.
-  // Para @lid no lo usamos como teléfono porque puede contener el mismo LID.
-  if (!numeroWhatsapp && !idWhatsapp.endsWith("@lid") && contacto?.number) {
-    numeroWhatsapp = normalizarNumeroWhatsapp(contacto.number);
+  if (
+    !numeroWhatsapp &&
+    (idWhatsapp.endsWith("@c.us") || idWhatsapp.endsWith("@s.whatsapp.net"))
+  ) {
+    const numero = normalizarNumeroWhatsapp(idWhatsapp);
+
+    if (telefonoPareceReal(numero, identificador)) {
+      numeroWhatsapp = numero;
+    }
   }
 
-  // Para chats modernos @lid resolvemos expresamente LID -> PN.
   if (!numeroWhatsapp && idWhatsapp.endsWith("@lid")) {
     numeroWhatsapp = await resolverTelefonoRealDesdeLid(idWhatsapp);
   }
@@ -1040,6 +1115,86 @@ async function obtenerIdentidadCliente(msg) {
     nombreContacto,
     idWhatsapp,
   };
+}
+
+async function obtenerIdentidadChat(chat) {
+  const idWhatsapp = String(chat?.id?._serialized || "").trim();
+
+  const identificador = normalizarIdentificadorWhatsapp(idWhatsapp);
+
+  let numeroWhatsapp = null;
+  let nombreContacto = chat?.name || null;
+
+  let contacto = null;
+
+  try {
+    contacto = await chat.getContact();
+
+    nombreContacto =
+      contacto?.pushname ||
+      contacto?.name ||
+      contacto?.shortName ||
+      nombreContacto;
+
+    numeroWhatsapp = await resolverTelefonoDesdeContacto(contacto, idWhatsapp);
+  } catch (error) {
+    console.log(
+      `ℹ️ Contacto no disponible para ${idWhatsapp}:`,
+      error?.message || String(error),
+    );
+  }
+
+  if (
+    !numeroWhatsapp &&
+    (idWhatsapp.endsWith("@c.us") || idWhatsapp.endsWith("@s.whatsapp.net"))
+  ) {
+    const numero = normalizarNumeroWhatsapp(idWhatsapp);
+
+    if (telefonoPareceReal(numero, identificador)) {
+      numeroWhatsapp = numero;
+    }
+  }
+
+  if (!numeroWhatsapp && idWhatsapp.endsWith("@lid")) {
+    numeroWhatsapp = await resolverTelefonoRealDesdeLid(idWhatsapp);
+  }
+
+  return {
+    identificador,
+    numeroWhatsapp,
+    nombreContacto,
+    idWhatsapp,
+  };
+}
+
+function textoMensajeParaSincronizacion(msg) {
+  const body = String(msg?.body || "").trim();
+
+  if (body) {
+    return body;
+  }
+
+  switch (msg?.type) {
+    case "image":
+      return "[Imagen]";
+    case "video":
+      return "[Video]";
+    case "audio":
+    case "ptt":
+      return "[Audio]";
+    case "document":
+      return "[Documento]";
+    default:
+      return null;
+  }
+}
+
+function fechaDesdeTimestampWhatsapp(timestamp) {
+  if (!timestamp) {
+    return null;
+  }
+
+  return new Date(Number(timestamp) * 1000);
 }
 
 function extraerIdPublicacion(texto) {
@@ -1065,73 +1220,223 @@ function extraerIdPublicacion(texto) {
 }
 
 // ============================================================
-// RESOLVER TELEFONOS REALES DE CHATS @lid
-// DIAGNOSTICO / NORMALIZACION HISTORICA
+// SINCRONIZACION CRM DESDE LA SESION ACTIVA DE WHATSAPP
 // ============================================================
 
-app.get("/resolver-telefonos", async (req, res) => {
+function validarClaveInterna(req, res) {
   const key = String(req.headers["x-tuvendedor-internal-key"] || "");
 
   if (!TUVENDEDOR_INTERNAL_KEY || key !== TUVENDEDOR_INTERNAL_KEY) {
-    return res.status(401).json({
+    res.status(401).json({
       success: false,
       message: "No autorizado.",
     });
+
+    return false;
+  }
+
+  return true;
+}
+
+function rangoDiaParaguay(fecha) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fecha || ""))) {
+    return null;
+  }
+
+  const inicioMs = Date.parse(`${fecha}T00:00:00-03:00`);
+
+  if (!Number.isFinite(inicioMs)) {
+    return null;
+  }
+
+  return {
+    inicio: Math.floor(inicioMs / 1000),
+
+    fin: Math.floor(inicioMs / 1000) + 24 * 60 * 60,
+  };
+}
+
+app.get("/crm/chats-dia", async (req, res) => {
+  if (!validarClaveInterna(req, res)) {
+    return;
   }
 
   if (!whatsappReady) {
     return res.status(503).json({
       success: false,
       message: "WhatsApp todavía no está listo.",
+      data: [],
     });
   }
 
-  if (typeof client.getContactLidAndPhone !== "function") {
-    return res.status(501).json({
+  const fecha = String(req.query.fecha || "").trim();
+
+  const rango = rangoDiaParaguay(fecha);
+
+  if (!rango) {
+    return res.status(400).json({
       success: false,
-      message:
-        "La versión instalada de whatsapp-web.js no soporta getContactLidAndPhone().",
+      message: "Fecha inválida. Usá YYYY-MM-DD.",
+      data: [],
     });
   }
 
   try {
     const chats = await client.getChats();
 
-    const lids = [
-      ...new Set(
-        chats
-          .map((chat) => chat?.id?._serialized)
-          .filter((id) => id && String(id).endsWith("@lid")),
-      ),
-    ];
-
     const data = [];
-    const TAMANO_LOTE = 10;
+    let errores = 0;
 
-    for (let i = 0; i < lids.length; i += TAMANO_LOTE) {
-      const lote = lids.slice(i, i + TAMANO_LOTE);
+    for (const chat of chats || []) {
+      const idWhatsapp = String(chat?.id?._serialized || "").trim();
+
+      if (
+        !idWhatsapp ||
+        idWhatsapp.endsWith("@g.us") ||
+        idWhatsapp.includes("@broadcast") ||
+        idWhatsapp === "status@broadcast"
+      ) {
+        continue;
+      }
 
       try {
-        const resultado = await client.getContactLidAndPhone(lote);
+        const mensajes = await chat.fetchMessages({
+          limit: 120,
+        });
 
-        for (const item of resultado || []) {
-          const identificadorExterno = normalizarIdentificadorWhatsapp(
-            item?.lid,
-          );
+        const mensajesDia = (mensajes || [])
+          .filter(
+            (mensaje) =>
+              Number(mensaje?.timestamp) >= rango.inicio &&
+              Number(mensaje?.timestamp) < rango.fin,
+          )
+          .sort((a, b) => Number(a.timestamp || 0) - Number(b.timestamp || 0));
 
-          const telefono = normalizarNumeroWhatsapp(item?.pn);
-
-          if (identificadorExterno && telefono) {
-            data.push({
-              identificadorExterno,
-              telefono,
-            });
-          }
+        if (!mensajesDia.length) {
+          continue;
         }
-      } catch (errorLote) {
+
+        const mensajesCliente = mensajesDia.filter(
+          (mensaje) => !mensaje.fromMe,
+        );
+
+        const respuestas = mensajesDia.filter((mensaje) => mensaje.fromMe);
+
+        const ultimoCliente = mensajesCliente.at(-1) || null;
+
+        const ultimaRespuesta = respuestas.at(-1) || null;
+
+        const ultimaInteraccion = mensajesDia.at(-1);
+
+        const identidad = await obtenerIdentidadChat(chat);
+
+        if (!identidad.identificador) {
+          errores++;
+          continue;
+        }
+
+        data.push({
+          identificadorExterno: identidad.identificador,
+
+          numeroWhatsapp: identidad.numeroWhatsapp,
+
+          nombreContacto: identidad.nombreContacto,
+
+          ultimoMensajeCliente: textoMensajeParaSincronizacion(ultimoCliente),
+
+          ultimaRespuesta: textoMensajeParaSincronizacion(ultimaRespuesta),
+
+          fechaUltimoMensajeCliente: fechaDesdeTimestampWhatsapp(
+            ultimoCliente?.timestamp,
+          ),
+
+          fechaUltimaRespuesta: fechaDesdeTimestampWhatsapp(
+            ultimaRespuesta?.timestamp,
+          ),
+
+          fechaUltimaInteraccion: fechaDesdeTimestampWhatsapp(
+            ultimaInteraccion?.timestamp,
+          ),
+
+          cantidadMensajesDia: mensajesDia.length,
+        });
+      } catch (errorChat) {
+        errores++;
+
         console.log(
-          "ℹ️ Lote LID no resuelto:",
-          errorLote?.message || String(errorLote),
+          `ℹ️ No se pudo sincronizar chat ${idWhatsapp}:`,
+          errorChat?.message || String(errorChat),
+        );
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      fecha,
+      cantidad: data.length,
+      errores,
+      data,
+    });
+  } catch (error) {
+    console.error("❌ Error obteniendo chats de WhatsApp:", error);
+
+    return res.status(500).json({
+      success: false,
+      message:
+        error?.message || "No se pudieron obtener los chats de WhatsApp.",
+      data: [],
+    });
+  }
+});
+
+app.get("/resolver-telefonos", async (req, res) => {
+  if (!validarClaveInterna(req, res)) {
+    return;
+  }
+
+  if (!whatsappReady) {
+    return res.status(503).json({
+      success: false,
+      message: "WhatsApp todavía no está listo.",
+      data: [],
+    });
+  }
+
+  try {
+    const chats = await client.getChats();
+
+    const data = [];
+    let errores = 0;
+
+    for (const chat of chats || []) {
+      const idWhatsapp = String(chat?.id?._serialized || "").trim();
+
+      if (
+        !idWhatsapp ||
+        idWhatsapp.endsWith("@g.us") ||
+        idWhatsapp.includes("@broadcast")
+      ) {
+        continue;
+      }
+
+      try {
+        const identidad = await obtenerIdentidadChat(chat);
+
+        if (identidad.identificador && identidad.numeroWhatsapp) {
+          data.push({
+            identificadorExterno: identidad.identificador,
+
+            telefono: identidad.numeroWhatsapp,
+
+            nombreContacto: identidad.nombreContacto,
+          });
+        }
+      } catch (errorChat) {
+        errores++;
+
+        console.log(
+          `ℹ️ Teléfono no resuelto para ${idWhatsapp}:`,
+          errorChat?.message || String(errorChat),
         );
       }
     }
@@ -1139,6 +1444,7 @@ app.get("/resolver-telefonos", async (req, res) => {
     return res.status(200).json({
       success: true,
       cantidad: data.length,
+      errores,
       data,
     });
   } catch (error) {
@@ -1147,6 +1453,7 @@ app.get("/resolver-telefonos", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: error?.message || "No se pudieron resolver los teléfonos.",
+      data: [],
     });
   }
 });
