@@ -129,6 +129,16 @@ const BACKEND_TIMEOUT_MS = Number(process.env.BACKEND_TIMEOUT_MS || 130000);
 
 const WHISPER_TIMEOUT_MS = Number(process.env.WHISPER_TIMEOUT_MS || 120000);
 
+const WA_MEDIA_DOWNLOAD_ATTEMPTS = Math.max(
+  1,
+  Number(process.env.WA_MEDIA_DOWNLOAD_ATTEMPTS || 3),
+);
+
+const WA_MEDIA_DOWNLOAD_RETRY_MS = Math.max(
+  200,
+  Number(process.env.WA_MEDIA_DOWNLOAD_RETRY_MS || 900),
+);
+
 // Evita responder mensajes sincronizados durante el arranque, pero sin dejar
 
 // al bot "ciego" demasiado tiempo después de quedar listo.
@@ -888,6 +898,101 @@ function asegurarIdSerializadoMensaje(msg) {
   return serializado;
 }
 
+function esperar(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function limpiarBase64Media(valor) {
+  const texto = String(valor || "").trim();
+
+  if (!texto) {
+    return "";
+  }
+
+  const indiceBase64 = texto.indexOf(";base64,");
+
+  const soloBase64 =
+    indiceBase64 >= 0
+      ? texto.substring(indiceBase64 + ";base64,".length)
+      : texto;
+
+  return soloBase64.replace(/\s+/g, "");
+}
+
+function normalizarMimeType(valor) {
+  return String(valor || "")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+}
+
+function inferirMimeImagenDesdeBase64(base64) {
+  try {
+    const cabecera = Buffer.from(base64.slice(0, 64), "base64");
+
+    if (
+      cabecera.length >= 3 &&
+      cabecera[0] === 0xff &&
+      cabecera[1] === 0xd8 &&
+      cabecera[2] === 0xff
+    ) {
+      return "image/jpeg";
+    }
+
+    if (
+      cabecera.length >= 8 &&
+      cabecera[0] === 0x89 &&
+      cabecera[1] === 0x50 &&
+      cabecera[2] === 0x4e &&
+      cabecera[3] === 0x47
+    ) {
+      return "image/png";
+    }
+
+    if (
+      cabecera.length >= 12 &&
+      cabecera.toString("ascii", 0, 4) === "RIFF" &&
+      cabecera.toString("ascii", 8, 12) === "WEBP"
+    ) {
+      return "image/webp";
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizarMediaDescargada(media, tipo) {
+  const data = limpiarBase64Media(media?.data);
+
+  if (!data) {
+    throw new Error(`WhatsApp no devolvió datos para el archivo ${tipo}.`);
+  }
+
+  let mimetype = normalizarMimeType(media?.mimetype);
+
+  if (tipo === "IMAGEN" && !mimetype) {
+    mimetype = inferirMimeImagenDesdeBase64(data) || "";
+  }
+
+  if (tipo === "IMAGEN" && !mimetype.startsWith("image/")) {
+    throw new Error(
+      `La media recibida como imagen no tiene un MIME de imagen válido (${mimetype || "sin MIME"}).`,
+    );
+  }
+
+  const padding = data.match(/=*$/)?.[0]?.length ?? 0;
+  const bytesAprox = Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+
+  return {
+    ...media,
+    data,
+    mimetype,
+    bytesAprox,
+  };
+}
+
 async function descargarMediaSeguro(msg, tipo) {
   const serializado = asegurarIdSerializadoMensaje(msg);
 
@@ -903,35 +1008,57 @@ async function descargarMediaSeguro(msg, tipo) {
     );
   }
 
-  try {
-    const media = await msg.downloadMedia();
+  let ultimoError = null;
 
-    if (!media?.data) {
-      throw new Error(`WhatsApp no devolvió datos para el archivo ${tipo}.`);
+  for (let intento = 1; intento <= WA_MEDIA_DOWNLOAD_ATTEMPTS; intento += 1) {
+    try {
+      const mediaCruda = await msg.downloadMedia();
+      const media = normalizarMediaDescargada(mediaCruda, tipo);
+
+      console.log(
+        `✅ Media ${tipo} descargada desde WhatsApp` +
+          (intento > 1 ? ` en intento ${intento}` : ""),
+      );
+
+      console.log("📦 MIME:", media.mimetype || "(sin MIME)");
+
+      console.log(
+        "📦 Tamaño aproximado:",
+        `${(media.bytesAprox / 1024 / 1024).toFixed(2)} MB`,
+      );
+
+      return media;
+    } catch (error) {
+      ultimoError = error;
+
+      const esUltimoIntento = intento >= WA_MEDIA_DOWNLOAD_ATTEMPTS;
+
+      console.error(
+        `⚠️ downloadMedia falló para ${tipo} (intento ${intento}/${WA_MEDIA_DOWNLOAD_ATTEMPTS})`,
+      );
+
+      console.error("Error:", error?.message || String(error));
+
+      if (
+        esUltimoIntento ||
+        !whatsappReady ||
+        esErrorContextoNavegacion(error)
+      ) {
+        break;
+      }
+
+      await esperar(WA_MEDIA_DOWNLOAD_RETRY_MS * intento);
     }
-
-    const bytesAprox = Math.floor((media.data.length * 3) / 4);
-
-    console.log(`✅ Media ${tipo} descargada desde WhatsApp`);
-
-    console.log("📦 MIME:", media.mimetype || "(sin MIME)");
-
-    console.log(
-      "📦 Tamaño aproximado:",
-
-      `${(bytesAprox / 1024 / 1024).toFixed(2)} MB`,
-    );
-
-    return media;
-  } catch (error) {
-    console.error(`❌ downloadMedia falló para ${tipo}`);
-
-    console.error("ID recibido:", JSON.stringify(msg?.id ?? null));
-
-    console.error("Error:", error?.stack || error?.message || String(error));
-
-    throw error;
   }
+
+  console.error(`❌ No se pudo descargar la media ${tipo}.`);
+  console.error("ID recibido:", JSON.stringify(msg?.id ?? null));
+  console.error(
+    "Error final:",
+    ultimoError?.stack || ultimoError?.message || String(ultimoError),
+  );
+
+  throw ultimoError || new Error(`No se pudo descargar la media ${tipo}.`);
 }
 
 function obtenerIdMensaje(msg) {
@@ -1202,12 +1329,11 @@ function extraerIdPublicacion(texto) {
     return null;
   }
 
-  // Soporta enlaces/rutas que contengan share/producto/123, producto/123
-
-  // y referencias simples TV-123.
+  // Formato actual del frontend: [TV_PRODUCTO:123]
+  // También conserva compatibilidad con links/rutas y referencias TV-123.
 
   const match = String(texto).match(
-    /(?:share\/producto\/|producto\/|TV-)(\d+)/i,
+    /(?:\[TV_PRODUCTO\s*:\s*|share\/producto\/|producto\/|TV-)(\d+)\]?/i,
   );
 
   if (!match?.[1]) {
