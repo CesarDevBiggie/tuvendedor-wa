@@ -1219,6 +1219,105 @@ function extraerIdPublicacion(texto) {
   return Number.isInteger(id) && id > 0 ? id : null;
 }
 
+async function resolverIdentidadPorIdentificador(identificadorEntrada) {
+  const identificador = normalizarIdentificadorWhatsapp(identificadorEntrada);
+
+  if (!identificador) {
+    return {
+      identificadorExterno: "",
+      numeroWhatsapp: null,
+      nombreContacto: null,
+      error: "Identificador vacío.",
+    };
+  }
+
+  let numeroWhatsapp = null;
+  let nombreContacto = null;
+  let ultimoError = null;
+
+  const candidatos = [
+    String(identificadorEntrada || "").trim(),
+    `${identificador}@lid`,
+    `${identificador}@c.us`,
+    identificador,
+  ].filter(Boolean);
+
+  const candidatosUnicos = [...new Set(candidatos)];
+
+  for (const candidato of candidatosUnicos) {
+    if (numeroWhatsapp) {
+      break;
+    }
+
+    if (typeof client.getContactLidAndPhone === "function") {
+      try {
+        const resultado = await client.getContactLidAndPhone([candidato]);
+
+        const item = resultado?.[0] ?? null;
+
+        const numero = normalizarNumeroWhatsapp(item?.pn ?? null);
+
+        if (telefonoPareceReal(numero, `${identificador}@lid`)) {
+          numeroWhatsapp = numero;
+        }
+      } catch (error) {
+        ultimoError = error?.message || String(error);
+      }
+    }
+
+    if (!numeroWhatsapp) {
+      try {
+        const idContacto = candidato.includes("@")
+          ? candidato
+          : `${candidato}@c.us`;
+
+        const contacto = await client.getContactById(idContacto);
+
+        if (contacto) {
+          nombreContacto =
+            contacto?.pushname ||
+            contacto?.name ||
+            contacto?.shortName ||
+            nombreContacto;
+
+          const numero = await resolverTelefonoDesdeContacto(
+            contacto,
+            idContacto,
+          );
+
+          if (telefonoPareceReal(numero, `${identificador}@lid`)) {
+            numeroWhatsapp = numero;
+          }
+        }
+      } catch (error) {
+        ultimoError = ultimoError || error?.message || String(error);
+      }
+    }
+  }
+
+  if (!numeroWhatsapp && /^595\\d{8,10}$/.test(identificador)) {
+    numeroWhatsapp = identificador;
+  }
+
+  if (numeroWhatsapp && !nombreContacto) {
+    try {
+      const contacto = await client.getContactById(`${numeroWhatsapp}@c.us`);
+
+      nombreContacto =
+        contacto?.pushname || contacto?.name || contacto?.shortName || null;
+    } catch {
+      // El teléfono ya está resuelto; el nombre es opcional.
+    }
+  }
+
+  return {
+    identificadorExterno: identificador,
+    numeroWhatsapp,
+    nombreContacto,
+    error: numeroWhatsapp ? null : ultimoError,
+  };
+}
+
 // ============================================================
 // SINCRONIZACION CRM DESDE LA SESION ACTIVA DE WHATSAPP
 // ============================================================
@@ -1255,6 +1354,63 @@ function rangoDiaParaguay(fecha) {
     fin: Math.floor(inicioMs / 1000) + 24 * 60 * 60,
   };
 }
+
+app.post("/crm/resolver-identidades", async (req, res) => {
+  if (!validarClaveInterna(req, res)) {
+    return;
+  }
+
+  if (!whatsappReady) {
+    return res.status(503).json({
+      success: false,
+      message: "WhatsApp todavía no está listo.",
+      data: [],
+    });
+  }
+
+  const identificadores = Array.isArray(req.body?.identificadores)
+    ? req.body.identificadores
+    : [];
+
+  const normalizados = [
+    ...new Set(
+      identificadores
+        .map((item) => normalizarIdentificadorWhatsapp(item))
+        .filter(Boolean),
+    ),
+  ].slice(0, 500);
+
+  const data = [];
+  let errores = 0;
+
+  for (const identificador of normalizados) {
+    try {
+      const identidad = await resolverIdentidadPorIdentificador(identificador);
+
+      if (!identidad.numeroWhatsapp) {
+        errores++;
+      }
+
+      data.push(identidad);
+    } catch (error) {
+      errores++;
+
+      data.push({
+        identificadorExterno: identificador,
+        numeroWhatsapp: null,
+        nombreContacto: null,
+        error: error?.message || String(error),
+      });
+    }
+  }
+
+  return res.status(200).json({
+    success: true,
+    cantidad: data.length,
+    errores,
+    data,
+  });
+});
 
 app.get("/crm/chats-dia", async (req, res) => {
   if (!validarClaveInterna(req, res)) {
