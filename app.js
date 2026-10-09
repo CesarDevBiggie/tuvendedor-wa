@@ -12,7 +12,7 @@ const axios = require("axios");
 
 const cors = require("cors");
 
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 
 // ============================================================
 
@@ -128,6 +128,22 @@ const WA_CLIENT_ID = String(
 const BACKEND_TIMEOUT_MS = Number(process.env.BACKEND_TIMEOUT_MS || 130000);
 
 const WHISPER_TIMEOUT_MS = Number(process.env.WHISPER_TIMEOUT_MS || 120000);
+
+// Imagen institucional que Panambí adjunta cuando comparte la URL general.
+// Así no dependemos del preview automático de WhatsApp/Meta.
+const TUVENDEDOR_PUBLIC_URL = String(
+  process.env.TUVENDEDOR_PUBLIC_URL || "https://tuvendedor.com.py",
+).replace(/\/$/, "");
+
+const TUVENDEDOR_SHARE_IMAGE_URL = String(
+  process.env.TUVENDEDOR_SHARE_IMAGE_URL ||
+    `${TUVENDEDOR_PUBLIC_URL}/TuVendedor_share_20261008.jpg`,
+).trim();
+
+const SHARE_IMAGE_CACHE_MS = 30 * 60 * 1000;
+
+let shareImageCache = null;
+let shareImageCacheAt = 0;
 
 const WA_MEDIA_DOWNLOAD_ATTEMPTS = Math.max(
   1,
@@ -474,6 +490,115 @@ client.on("disconnected", (reason) => {
 });
 
 // ============================================================
+// RESPUESTA AL CLIENTE / IMAGEN INSTITUCIONAL
+// ============================================================
+
+function contieneUrlGeneralTuVendedor(texto) {
+  const urls =
+    String(texto || "").match(
+      /https?:\/\/(?:www\.)?tuvendedor\.com\.py[^\s]*/gi,
+    ) || [];
+
+  return urls.some((url) => {
+    const sinDominio = url.replace(
+      /^https?:\/\/(?:www\.)?tuvendedor\.com\.py/i,
+      "",
+    );
+
+    // Los enlaces de productos tienen su propia imagen/preview.
+    if (/^\/share\/producto\/\d+/i.test(sinDominio)) {
+      return false;
+    }
+
+    if (/^\/producto\/\d+/i.test(sinDominio)) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+async function obtenerImagenInstitucionalTuVendedor() {
+  const ahora = Date.now();
+
+  if (shareImageCache && ahora - shareImageCacheAt < SHARE_IMAGE_CACHE_MS) {
+    return new MessageMedia(
+      shareImageCache.mimetype,
+      shareImageCache.data,
+      shareImageCache.filename,
+    );
+  }
+
+  const response = await axios.get(TUVENDEDOR_SHARE_IMAGE_URL, {
+    responseType: "arraybuffer",
+    timeout: 15000,
+    maxContentLength: 5 * 1024 * 1024,
+    maxBodyLength: 5 * 1024 * 1024,
+    headers: {
+      "User-Agent": "TuVendedor-WhatsApp-Bridge/1.0",
+    },
+  });
+
+  const mimetype = String(response.headers?.["content-type"] || "image/jpeg")
+    .split(";")[0]
+    .trim()
+    .toLowerCase();
+
+  if (!mimetype.startsWith("image/")) {
+    throw new Error(
+      `La URL institucional no devolvió una imagen. Content-Type=${mimetype}`,
+    );
+  }
+
+  shareImageCache = {
+    mimetype,
+    data: Buffer.from(response.data).toString("base64"),
+    filename: "TuVendedor.jpg",
+  };
+
+  shareImageCacheAt = ahora;
+
+  return new MessageMedia(
+    shareImageCache.mimetype,
+    shareImageCache.data,
+    shareImageCache.filename,
+  );
+}
+
+async function enviarRespuestaCliente(msg, respuesta) {
+  const texto = String(respuesta || "").trim();
+
+  if (!texto) {
+    return;
+  }
+
+  if (contieneUrlGeneralTuVendedor(texto)) {
+    try {
+      const media = await obtenerImagenInstitucionalTuVendedor();
+
+      await msg.reply(media, undefined, {
+        caption: texto,
+      });
+
+      console.log(
+        "🖼️ Respuesta enviada con imagen institucional de TuVendedor.",
+      );
+
+      return;
+    } catch (errorImagen) {
+      console.error(
+        "⚠️ No se pudo adjuntar la imagen institucional; se enviará texto:",
+        errorImagen?.message || String(errorImagen),
+      );
+    }
+  }
+
+  await msg.reply(texto, undefined, {
+    linkPreview: true,
+  });
+}
+
+// ============================================================
 
 // MENSAJES ENTRANTES
 
@@ -614,7 +739,7 @@ client.on("message", async (msg) => {
       return;
     }
 
-    await msg.reply(String(respuesta));
+    await enviarRespuestaCliente(msg, String(respuesta));
 
     console.log("✅ Respuesta enviada al cliente que escribió.");
   } catch (error) {
