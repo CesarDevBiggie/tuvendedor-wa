@@ -21,6 +21,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY app.js ./
+COPY seguimiento-routes.js ./
 
 EXPOSE 3100
 
