@@ -8,8 +8,8 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
-const QRCode = require("qrcode-terminal/lib/vendor/QRCode");
-const QRErrorCorrectLevel = require("qrcode-terminal/lib/vendor/QRCode/QRErrorCorrectLevel");
+const QRCode = require("qrcode-terminal/vendor/QRCode");
+const QRErrorCorrectLevel = require("qrcode-terminal/vendor/QRCode/QRErrorCorrectLevel");
 
 const app = express();
 app.disable("x-powered-by");
