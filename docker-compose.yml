@@ -1,28 +1,53 @@
-# Lanzar por separado: docker compose -f docker-compose.manager.yml up -d --build
-# NO se recrea el tuvendedor_wa existente.
+# ÚNICO compose de TuVendedor WhatsApp: principal + multicanal.
+# IMPORTANTE: mantener .env.production existente, sin sobrescribir ni divulgar.
+# IMPORTANTE: el auth principal sigue exactamente en el volumen de producción original.
 services:
-  tuvendedor_wa_manager:
+  tuvendedor_wa:
     build:
       context: .
-      dockerfile: Dockerfile.manager
+      dockerfile: Dockerfile
+    image: tuvendedor-wa:unificado-20261017
+    container_name: tuvendedor_wa
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      WA_DISABLE_ERROR_FALLBACK: "true"
+    volumes:
+      - /srv/tuvendedor/whatsapp/auth:/app/.wwebjs_auth
+      - /srv/tuvendedor/whatsapp/cache:/app/.wwebjs_cache
+    ports:
+      - "127.0.0.1:3100:3100"
+    networks:
+      - ecommerce_network
+    restart: unless-stopped
+    init: true
+    shm_size: "512mb"
+
+  tuvendedor_wa_manager:
+    image: tuvendedor-wa:unificado-20261017
     container_name: tuvendedor_wa_manager
+    command: ["node", "manager.js"]
+    depends_on:
+      - tuvendedor_wa
     env_file:
       - .env.production
     environment:
       NODE_ENV: production
       WA_MANAGER_PORT: "3200"
-      TUVENDEDOR_API_URL: http://market_backend
-      WA_LEGACY_BRIDGE_URL: http://tuvendedor_wa:3100
       WA_MANAGER_STATE_DIR: /var/lib/tuvendedor-wa-manager
+      WA_LEGACY_BRIDGE_URL: http://tuvendedor_wa:3100
+      TUVENDEDOR_API_URL: http://market_backend
     volumes:
-      # Diferente de /srv/tuvendedor/whatsapp/auth (número principal).
+      # Independiente de las credenciales del principal.
       - /srv/tuvendedor/whatsapp/manager:/var/lib/tuvendedor-wa-manager
     networks:
       - ecommerce_network
     restart: unless-stopped
     init: true
     shm_size: "1gb"
-    # Sin puertos externos: el backend accede por red interna Docker.
+    # Sin ports: solo accesible desde la red privada de Docker.
+
 networks:
   ecommerce_network:
     external: true

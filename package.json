@@ -5,8 +5,9 @@
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
+    "manager": "node manager.js",
     "dev": "node app.js",
-    "check": "node --check app.js"
+    "check": "node --check app.js && node --check manager.js && node --check seguimiento-routes.js"
   },
   "keywords": [],
   "author": "github:pedroslopez/whatsapp-web.js#webpack-exodus",

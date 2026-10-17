@@ -109,6 +109,44 @@ const TUVENDEDOR_API_URL = (
 ).replace(/\/$/, "");
 
 const TUVENDEDOR_INTERNAL_KEY = process.env.TUVENDEDOR_INTERNAL_KEY || "";
+let atencionAutomatica = process.env.WA_AUTORESPONDER_ENABLED !== "false";
+let operativo = true;
+let cambiandoConexion = false;
+let ultimoQr = null;
+let ultimaConexionError = null;
+const dirigidoPorManager = process.env.WA_CONTROLLED_BY_MANAGER === "true";
+const rutaSesion = process.env.WA_AUTH_DATA_PATH || path.resolve(process.cwd(), ".wwebjs_auth");
+// Los cambios desde la pantalla sobreviven reinicios del contenedor principal.
+// El volumen /app/.wwebjs_auth ya está montado en docker-compose.yml.
+const archivoControlPanel = path.join(rutaSesion,
+  dirigidoPorManager ? `control-${WA_ID_CONTROL_SEGURO()}.json` : "control-panel.json");
+function WA_ID_CONTROL_SEGURO() {
+  return String(process.env.WA_CLIENT_ID || "tuvendedor-local").replace(/[^a-zA-Z0-9_-]/g, "").slice(0,40);
+}
+try {
+  if (!dirigidoPorManager && fs.existsSync(archivoControlPanel)) {
+    const guardado = JSON.parse(fs.readFileSync(archivoControlPanel, "utf8"));
+    if (typeof guardado.atencionAutomatica === "boolean")
+      atencionAutomatica = guardado.atencionAutomatica;
+    if (typeof guardado.operativo === "boolean") operativo = guardado.operativo;
+  }
+} catch(err) {
+  console.error("No se pudo leer configuración de atención del panel:",err?.message);
+  // Ante estado ilegible, no activamos por defecto la IA.
+  atencionAutomatica = false;
+}
+function guardarEstadoAtencionPanel() {
+  try {
+    fs.mkdirSync(path.dirname(archivoControlPanel), {recursive:true});
+    const temporal = archivoControlPanel + ".tmp";
+    fs.writeFileSync(temporal, JSON.stringify({atencionAutomatica, operativo}), {mode:0o600});
+    fs.renameSync(temporal,archivoControlPanel);
+    return true;
+  } catch(err) {
+    console.error("No se pudo persistir la atención automática:",err?.message);
+    return false;
+  }
+}
 
 const WHISPER_URL =
   process.env.WHISPER_URL ||
@@ -188,11 +226,6 @@ app.use(express.json({ limit: "25mb" }));
 // ============================================================
 
 let whatsappReady = false;
-let ultimoQr = null;
-const WA_CHANNEL_ID = String(process.env.WA_CHANNEL_ID || "");
-let atencionAutomatica = process.env.WA_AUTORESPONDER_ENABLED !== "false";
-const WA_DISABLE_ERROR_FALLBACK =
-  process.env.WA_DISABLE_ERROR_FALLBACK === "true";
 
 let procesarMensajesDesde = null;
 
@@ -262,7 +295,7 @@ function estamosEnReautenticacion() {
 }
 
 function programarReinicio(motivo, demoraMs = 2500) {
-  if (reinicioProgramado || cerrandoAplicacion) {
+  if (!operativo || cambiandoConexion || reinicioProgramado || cerrandoAplicacion) {
     return;
   }
 
@@ -298,12 +331,7 @@ function programarReinicio(motivo, demoraMs = 2500) {
 const client = new Client({
   authStrategy: new LocalAuth({
     clientId: WA_CLIENT_ID,
-
-    // Para canales administrados, carpeta aislada y persistente por instalación.
-    ...(process.env.WA_AUTH_DATA_PATH
-      ? { dataPath: process.env.WA_AUTH_DATA_PATH }
-      : {}),
-
+    ...(process.env.WA_AUTH_DATA_PATH ? { dataPath: process.env.WA_AUTH_DATA_PATH } : {}),
     rmMaxRetries: 30,
   }),
 
@@ -375,6 +403,12 @@ client.on("loading_screen", (percent, message) => {
 
 client.on("ready", () => {
   ultimoQr = null;
+  if (!operativo) {
+    whatsappReady = false;
+    atencionAutomatica = false;
+    console.log("WhatsApp completó carga después de desconexión manual. Manteniendo Panambí pausado.");
+    return;
+  }
   whatsappReady = true;
 
   esperandoNuevaVinculacion = false;
@@ -456,6 +490,11 @@ client.on("disconnected", (reason) => {
     console.log("");
   }
 
+  if (!operativo || cambiandoConexion || cerrandoAplicacion) {
+    console.log("Conexión detenida desde el panel; no se reiniciará automáticamente.");
+    return;
+  }
+
   if (motivo.toUpperCase() === "LOGOUT") {
     // IMPORTANTE:
 
@@ -494,7 +533,6 @@ client.on("disconnected", (reason) => {
 // ============================================================
 
 client.on("message", async (msg) => {
-  // Canal en pruebas: recibe QR y se conecta, pero NO contesta clientes.
   if (!atencionAutomatica) return;
   const textoOriginal = String(msg.body || "").trim();
 
@@ -552,7 +590,10 @@ client.on("message", async (msg) => {
       // Identificador estable de la conversación. Puede ser un LID.
       // El backend lo utiliza para conservar el contexto de la conversación.
       telefono: identidad.identificador,
-      ...(WA_CHANNEL_ID ? { canalWhatsapp: WA_CHANNEL_ID } : {}),
+
+      // Solo los canales adicionales envían una identificación de canal.
+      // El número principal conserva el identificador histórico de conversación.
+      ...(process.env.WA_CHANNEL_ID ? { canalWhatsapp: process.env.WA_CHANNEL_ID } : {}),
 
       // Datos comerciales reales del contacto.
       numeroWhatsapp: identidad.numeroWhatsapp ?? null,
@@ -623,9 +664,9 @@ client.on("message", async (msg) => {
 
     // podría haberse desconectado durante esa espera.
 
-    if (!whatsappReady) {
+    if (!whatsappReady || !operativo || !atencionAutomatica || cambiandoConexion) {
       console.log(
-        "⚠️ La respuesta quedó lista, pero WhatsApp se desconectó antes de enviarla.",
+        "⚠️ No se envía respuesta: canal desconectado o Panambí pausado durante el procesamiento.",
       );
 
       return;
@@ -653,17 +694,16 @@ client.on("message", async (msg) => {
 
     // no intentamos responder usando un contexto de Chromium ya destruido.
 
-    if (!whatsappReady || esErrorContextoNavegacion(error)) {
+    if (!whatsappReady || !operativo || !atencionAutomatica ||
+        process.env.WA_DISABLE_ERROR_FALLBACK === "true" ||
+        esErrorContextoNavegacion(error)) {
       console.log(
-        "ℹ️ No se envía contingencia porque WhatsApp está reconectando.",
+        "ℹ️ Se omite la contingencia (canal pausado, desconectado, reconectando o política de silencio).",
       );
 
       return;
     }
 
-    // En los canales nuevos no responder si el backend falló: evita mensajes
-    // fuera de contexto, especialmente tras un cierre o toma humana.
-    if (WA_DISABLE_ERROR_FALLBACK) return;
     try {
       await msg.reply(
         "Un momentito 😊 Estoy revisando tu consulta. En breve seguimos desde donde quedamos 🙌",
@@ -1784,15 +1824,10 @@ app.get("/", (req, res) => {
 
 function adminAutorizado(req, res, next) {
   const crypto = require("crypto");
-  const enviada = Buffer.from(
-    String(req.headers["x-tuvendedor-internal-key"] || ""),
-  );
+  const enviada = Buffer.from(String(req.headers["x-tuvendedor-internal-key"] || ""));
   const esperada = Buffer.from(TUVENDEDOR_INTERNAL_KEY);
-  if (
-    !esperada.length ||
-    enviada.length !== esperada.length ||
-    !crypto.timingSafeEqual(enviada, esperada)
-  ) {
+  if (!esperada.length || enviada.length !== esperada.length ||
+      !crypto.timingSafeEqual(enviada, esperada)) {
     return res.status(401).json({ success: false, message: "No autorizado." });
   }
   next();
@@ -1800,78 +1835,122 @@ function adminAutorizado(req, res, next) {
 
 // Usado únicamente dentro de la red privada Docker por wa-manager.
 app.get("/admin/qr", adminAutorizado, (req, res) => {
-  res.json({ success: true, qr: ultimoQr, listo: whatsappReady });
+  res.json({ success: true, qr: operativo ? ultimoQr : null, listo: whatsappReady });
 });
 app.get("/admin/estado", adminAutorizado, (req, res) => {
-  res.json({
-    success: true,
-    listo: whatsappReady,
+  res.json({ success: true, listo: whatsappReady,
     numero: client.info?.wid?._serialized || null,
     nombre: client.info?.pushname || null,
     esperandoQr: esperandoNuevaVinculacion,
     motivoDesconexion: ultimoMotivoDesconexion,
-    atencionAutomatica,
-  });
+    atencionAutomatica, operativo, cambiandoConexion,
+    ultimoError: ultimaConexionError });
 });
 // Controles de seguridad del panel: pausar IA no desconecta el dispositivo.
 // No se expondrá este endpoint sin la llave interna. El administrador requiere JWT.
 app.put("/admin/attention", adminAutorizado, (req, res) => {
   if (typeof req.body?.activo !== "boolean")
-    return res
-      .status(400)
-      .json({ success: false, message: "activo debe ser booleano" });
+    return res.status(400).json({success:false,message:"activo debe ser booleano"});
+  if (req.body.activo && (!operativo || !whatsappReady))
+    return res.status(409).json({success:false,message:"Conectá WhatsApp antes de activar Panambí."});
+  const anterior = atencionAutomatica;
   atencionAutomatica = req.body.activo;
-  return res.json({
-    success: true,
-    data: { activo: atencionAutomatica },
-    message: atencionAutomatica
-      ? "Panambí activado."
-      : "Panambí pausado. WhatsApp continúa vinculado.",
+  if (!guardarEstadoAtencionPanel()) {
+    atencionAutomatica = anterior;
+    return res.status(503).json({success:false,message:"No se pudo guardar el cambio. Panambí conserva su estado anterior."});
+  }
+  return res.json({success:true, data:{activo:atencionAutomatica},
+    message:atencionAutomatica ? "Panambí activado." : "Panambí pausado. WhatsApp continúa vinculado."});
+});
+// Gestión idéntica para el principal y canales adicionales. No mueve ni borra
+// LocalAuth: desconectar=cerrar Chromium; reconectar=initialize con el mismo clientId.
+app.post("/admin/connection", adminAutorizado, (req, res) => {
+  if (typeof req.body?.conectar !== "boolean")
+    return res.status(400).json({success:false,message:"conectar debe ser booleano"});
+  if (cambiandoConexion || cierreDeSesionEnCurso)
+    return res.status(409).json({success:false,message:"Hay una operación de sesión en curso."});
+  const conectar = req.body.conectar;
+  if (operativo === conectar)
+    return res.json({success:true,data:{operativo,activo:atencionAutomatica},
+      message:conectar ? "WhatsApp ya está habilitado." : "WhatsApp ya está desconectado."});
+  const anterior = {operativo, atencionAutomatica};
+  operativo = conectar;
+  atencionAutomatica = false; // Nunca reactivar IA implícitamente.
+  if (!guardarEstadoAtencionPanel()) {
+    operativo=anterior.operativo; atencionAutomatica=anterior.atencionAutomatica;
+    return res.status(503).json({success:false,message:"No se pudo guardar el estado. No se cambió la conexión."});
+  }
+  cambiandoConexion=true;
+  whatsappReady=false;
+  procesarMensajesDesde=null;
+  esperandoNuevaVinculacion=false;
+  ultimoQr=null;
+  ultimaConexionError=null;
+  // Respondemos antes de esperar Chromium. El panel consulta estado periódicamente.
+  res.status(202).json({success:true,data:{operativo,activo:false},
+    message:conectar ? "Reconexión iniciada con la sesión guardada. Panambí seguirá pausado." :
+      "Desconexión iniciada. La sesión de WhatsApp se conserva."});
+  setImmediate(async () => {
+    try {
+      if (conectar) {
+        await client.initialize();
+      } else {
+        await client.destroy();
+      }
+    } catch (err) {
+      ultimaConexionError=String(err?.message || err).slice(0,300);
+      console.error("Error cambiando conexión desde el panel:", ultimaConexionError);
+      // Ante error de conexión, no activamos la IA ni informamos 'Conectado'.
+    } finally { cambiandoConexion=false; }
+  });
+});
+app.post("/admin/restart", adminAutorizado, (req, res) => {
+  if (!operativo || cambiandoConexion || cierreDeSesionEnCurso)
+    return res.status(409).json({success:false,message:"El canal debe estar conectado y libre para reiniciar."});
+  cambiandoConexion=true;
+  atencionAutomatica=false;
+  if (!guardarEstadoAtencionPanel()) {
+    cambiandoConexion=false;
+    return res.status(503).json({success:false,message:"No se pudo guardar el estado del canal."});
+  }
+  whatsappReady=false; procesarMensajesDesde=null; ultimoQr=null;
+  res.status(202).json({success:true,message:"Reiniciando WhatsApp. Panambí permanece pausado."});
+  setImmediate(async () => {
+    try { await client.destroy(); await client.initialize(); }
+    catch(err) { ultimaConexionError=String(err?.message || err).slice(0,300); console.error("Reinicio del panel:",ultimaConexionError); }
+    finally { cambiandoConexion=false; }
   });
 });
 let cierreDeSesionEnCurso = false;
 app.post("/admin/logout", adminAutorizado, async (req, res) => {
   if (cierreDeSesionEnCurso)
-    return res
-      .status(409)
-      .json({ success: false, message: "Ya se está cerrando la sesión." });
+    return res.status(409).json({success:false,message:"Ya se está cerrando la sesión."});
   if (!whatsappReady)
-    return res
-      .status(409)
-      .json({
-        success: false,
-        message:
-          "El número no está conectado para cerrar sesión. Primero conectalo.",
-      });
+    return res.status(409).json({success:false,message:"El número no está conectado para cerrar sesión. Primero conectalo."});
+  if (cambiandoConexion) return res.status(409).json({success:false,message:"Esperá que termine la conexión actual."});
   cierreDeSesionEnCurso = true;
+  operativo = false;
   atencionAutomatica = false;
+  if (!guardarEstadoAtencionPanel()) {
+    cierreDeSesionEnCurso = false;
+    return res.status(503).json({success:false,message:"No se pudo guardar el estado seguro del canal. No se cerró sesión."});
+  }
   whatsappReady = false;
   procesarMensajesDesde = null;
   try {
     // API oficial de whatsapp-web.js: invalida el dispositivo vinculado y
     // deja que LocalAuth elimine la sesión de este clientId. No hacemos rm -rf.
     await client.logout();
-    return res.json({
-      success: true,
-      message:
-        "Sesión de WhatsApp cerrada. Para volver a vincularla será necesario un nuevo QR.",
-    });
+    return res.json({success:true, message:"Sesión de WhatsApp cerrada. Para volver a vincularla será necesario un nuevo QR."});
   } catch (error) {
-    console.error(
-      "No se pudo confirmar logout de WhatsApp:",
-      error?.message || String(error),
-    );
-    return res
-      .status(503)
-      .json({
-        success: false,
-        message:
-          "WhatsApp no confirmó el cierre de sesión. Revisá el estado antes de intentar nuevamente.",
-      });
+    console.error("No se pudo confirmar logout de WhatsApp:", error?.message || String(error));
+    try { await client.destroy(); } catch (_) { /* Ya pudo haberse cerrado */ }
+    return res.status(503).json({success:false,message:"WhatsApp no confirmó el cierre de sesión. El canal quedó pausado; verificá el estado antes de reconectar."});
   } finally {
     cierreDeSesionEnCurso = false;
   }
 });
+
 
 app.get("/estado", (req, res) => {
   res.status(200).json({
@@ -1890,6 +1969,8 @@ app.get("/estado", (req, res) => {
     mensajesProcesados: mensajesProcesados.size,
 
     ultimoMotivoDesconexion,
+    operativo,
+    atencionAutomatica,
   });
 });
 
@@ -1925,7 +2006,7 @@ console.log("🛡️ El bot sólo responderá mensajes entrantes individuales.")
 
 console.log("");
 
-client.initialize().catch((error) => {
+if (operativo) client.initialize().catch((error) => {
   if (esErrorContextoNavegacion(error) && estamosEnReautenticacion()) {
     console.log(
       "ℹ️ WhatsApp cambió de pantalla durante la re-vinculación; esperando QR/ready...",
@@ -1940,6 +2021,7 @@ client.initialize().catch((error) => {
     `Error inicializando WhatsApp: ${error?.message || String(error)}`,
   );
 });
+else console.log("⏸️ WhatsApp desconectado manualmente desde el panel. Esperando orden de conectar.");
 
 // Ruta interna: el backend programa y autoriza los seguimientos.
 // El bridge solo envía cuando WhatsApp está listo.

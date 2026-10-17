@@ -1,6 +1,7 @@
 "use strict";
-// TuVendedor: panel de control para SEGUNDOS números. No toma posesión del
-// contenedor principal ni modifica sus credenciales LocalAuth existentes.
+// TuVendedor: administra TODOS los canales (principal incluido) con la misma API.
+// Principal permanece en su contenedor original y volumen LocalAuth; la conexión
+// se pausa/reanuda mediante sus rutas internas, sin mover archivos de sesión.
 const express = require("express");
 const axios = require("axios");
 const fs = require("fs");
@@ -21,6 +22,7 @@ const API = process.env.TUVENDEDOR_API_URL || "http://market_backend";
 const file = path.join(STATE_DIR, "channels.json");
 const running = new Map();
 const restartTimers = new Map();
+const stopping = new Map();
 let channels = [];
 
 if (!KEY || !API) { console.error("Faltan TUVENDEDOR_INTERNAL_KEY o TUVENDEDOR_API_URL."); process.exit(1); }
@@ -53,11 +55,13 @@ function getChannel(req, res) {
 }
 function start(c) {
   if (c.operativo === false || running.has(c.id)) return;
+  if (stopping.has(c.id)) { stopping.get(c.id).then(() => start(c)); return; }
   const env = { ...process.env,
     NODE_ENV: "production", PORT: String(c.port), WA_CLIENT_ID: c.id,
     WA_CHANNEL_ID: c.id, WA_AUTH_DATA_PATH: path.join(STATE_DIR, "auth"),
     WA_FOLLOWUP_DEDUPE_FILE: path.join(STATE_DIR, "dedupe", `${c.id}.json`),
     WA_AUTORESPONDER_ENABLED: c.activo ? "true" : "false",
+    WA_CONTROLLED_BY_MANAGER: "true",
     WA_DISABLE_ERROR_FALLBACK: "true", TUVENDEDOR_API_URL: API,
     WA_READY_GRACE_SECONDS: "5"
   };
@@ -75,22 +79,30 @@ function start(c) {
 function stop(c) {
   const t = restartTimers.get(c.id);
   if (t) { clearTimeout(t); restartTimers.delete(c.id); }
-  const p = running.get(c.id);
-  if (p) {
-    running.delete(c.id);
-    p.kill("SIGTERM");
-  }
+  if (stopping.has(c.id)) return stopping.get(c.id);
+  const proc = running.get(c.id);
+  if (!proc) return Promise.resolve();
+  // Evitamos abrir otro Chromium contra el mismo LocalAuth antes de que cierre.
+  running.delete(c.id);
+  const espera = new Promise(resolve => {
+    let terminado = false;
+    const fin = () => { if (!terminado) { terminado=true; resolve(); } };
+    proc.once("exit", fin);
+    const timeout = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch (_) { /* Puede haber terminado */ }
+      // No forzamos start hasta recibir exit, salvo que el proceso no exista.
+    }, 11000);
+    timeout.unref();
+    proc.once("exit", () => clearTimeout(timeout));
+    if (!proc.kill("SIGTERM")) fin();
+  });
+  const pending = espera.finally(() => stopping.delete(c.id));
+  stopping.set(c.id, pending);
+  return pending;
 }
 function restart(c) {
   if (c.operativo === false) return;
-
-  const t = restartTimers.get(c.id); if (t) { clearTimeout(t); restartTimers.delete(c.id); }
-  const p = running.get(c.id);
-  if (!p) { start(c); return; }
-  // El propio bridge cierra Chromium cuando recibe SIGTERM; no se borra LocalAuth.
-  running.delete(c.id);
-  p.once("exit", () => setTimeout(() => start(c), 1200));
-  p.kill("SIGTERM");
+  void stop(c).then(() => start(c));
 }
 async function remote(c, route) {
   try {
@@ -101,29 +113,28 @@ async function remote(c, route) {
 }
 async function legacy() {
   try {
-    const r = await axios.get(LEGACY.replace(/\/$/, "")+"/estado", {timeout:2500});
-    let puedeQr = false;
-    let controlable = false;
-    let atencionAutomatica = true;
-    try {
-      const estado = await axios.get(LEGACY.replace(/\/$/, "") + "/admin/estado", {
-        timeout: 1500, headers: { "X-TuVendedor-Internal-Key": KEY }
-      });
-      controlable = estado.status === 200 && estado.data?.success === true;
-      atencionAutomatica = estado.data?.atencionAutomatica !== false;
-    } catch { /* El principal sigue aislado hasta instalar su extensión. */ }
-    try {
-      const comprobacion = await axios.get(LEGACY.replace(/\/$/, "")+"/admin/qr", {
-        timeout:1500, headers:{"X-TuVendedor-Internal-Key":KEY}
-      });
-      puedeQr = comprobacion.status === 200 && comprobacion.data?.success === true;
-    } catch { /* El bridge principal todavía puede estar sin la extensión QR. */ }
-    return { id:"principal", nombre:"WhatsApp principal (actual)", principal:true,
-      editable:controlable, controlable, puedeQr, operativo:true, activo:atencionAutomatica, listo:Boolean(r.data?.whatsappReady),
-      numero:r.data?.numero || null, estado:r.data?.whatsappReady?"CONECTADO":"DESCONECTADO" };
+    const r = await axios.get(LEGACY.replace(/\/$/, "") + "/admin/estado", {
+      timeout: 3000, headers:{ "X-TuVendedor-Internal-Key": KEY }
+    });
+    const info = r.data;
+    if (!info?.success) throw new Error("El bridge principal no habilitó la administración");
+    const operativo = info.operativo !== false;
+    return {
+      id:"principal", nombre:"WhatsApp principal", principal:true,
+      editable:true, controlable:true, puedeQr:true,
+      operativo, activo: info.atencionAutomatica === true && operativo,
+      listo: Boolean(info.listo) && operativo,
+      numero: info.numero || null,
+      estado: !operativo ? "DESCONECTADO_MANUAL" : info.listo ? "CONECTADO" :
+        info.esperandoQr ? "ESPERANDO_QR" : "INICIANDO",
+      motivoDesconexion:info.motivoDesconexion || null,
+      ultimoError: info.ultimoError || null
+    };
   } catch {
-    return { id:"principal", nombre:"WhatsApp principal (actual)", principal:true,
-      editable:false, controlable:false, puedeQr:false, operativo:true, activo:true, listo:false, numero:null, estado:"SIN_ACCESO" };
+    return {id:"principal", nombre:"WhatsApp principal", principal:true,
+      editable:false, controlable:false, puedeQr:false, operativo:true,
+      activo:false, listo:false, numero:null, estado:"SIN_ACCESO",
+      motivoDesconexion:"El bridge principal todavía no está actualizado o no responde."};
   }
 }
 app.get("/api/channels", async (req, res) => {
@@ -167,7 +178,7 @@ app.get("/api/channels/:id/qr", async (req,res) => {
       });
       info = { qr:rr.data?.qr, listo:rr.data?.listo };
     } catch {
-      return res.status(409).json({success:false, message:"El bridge principal todavía no tiene habilitada la extensión QR web. No alteramos su sesión."});
+      return res.status(503).json({success:false, message:"El bridge principal no responde. Actualizá su app.js para mostrar el QR en pantalla."});
     }
   } else {
     const c = getChannel(req,res); if (!c) return;
@@ -200,9 +211,10 @@ app.put("/api/channels/:id/attention", async (req,res) => {
   return res.json({success:true,data:{id:c.id,activo:c.activo},message:"Configuración guardada. Reiniciando el canal sin perder la sesión."});
 });
 app.post("/api/channels/:id/connection", (req,res) => {
-  if (req.params.id === "principal") return res.status(409).json({success:false,message:"La desconexión temporal del canal principal no se admite todavía para proteger su contenedor existente. Podés pausar su IA o cerrar sesión."});
-  const c = getChannel(req,res); if (!c) return;
   if (typeof req.body?.conectar !== "boolean") return res.status(400).json({success:false,message:"conectar debe ser booleano"});
+  if (req.params.id === "principal")
+    return principalPost("/admin/connection", res, "POST", {conectar:req.body.conectar});
+  const c = getChannel(req,res); if (!c) return;
   const conectar = req.body.conectar;
   if (conectar) {
     if (c.operativo !== true) { c.operativo=true; c.activo=false; save(); start(c); }
@@ -232,7 +244,7 @@ app.post("/api/channels/:id/logout", async (req,res) => {
   }
 });
 app.post("/api/channels/:id/restart", (req,res) => {
-  if (req.params.id === "principal") return res.status(403).json({success:false,message:"El reinicio del canal principal se administra por separado."});
+  if (req.params.id === "principal") return principalPost("/admin/restart",res,"POST",{});
   const c = getChannel(req,res); if (!c) return;
   if (c.operativo === false) return res.status(409).json({success:false,message:"El canal está desconectado. Utilizá Conectar."});
   restart(c);
