@@ -188,6 +188,11 @@ app.use(express.json({ limit: "25mb" }));
 // ============================================================
 
 let whatsappReady = false;
+let ultimoQr = null;
+const WA_CHANNEL_ID = String(process.env.WA_CHANNEL_ID || "");
+let atencionAutomatica = process.env.WA_AUTORESPONDER_ENABLED !== "false";
+const WA_DISABLE_ERROR_FALLBACK =
+  process.env.WA_DISABLE_ERROR_FALLBACK === "true";
 
 let procesarMensajesDesde = null;
 
@@ -294,6 +299,11 @@ const client = new Client({
   authStrategy: new LocalAuth({
     clientId: WA_CLIENT_ID,
 
+    // Para canales administrados, carpeta aislada y persistente por instalación.
+    ...(process.env.WA_AUTH_DATA_PATH
+      ? { dataPath: process.env.WA_AUTH_DATA_PATH }
+      : {}),
+
     rmMaxRetries: 30,
   }),
 
@@ -331,6 +341,7 @@ const client = new Client({
 });
 
 client.on("qr", (qr) => {
+  ultimoQr = qr;
   whatsappReady = false;
 
   procesarMensajesDesde = null;
@@ -363,6 +374,7 @@ client.on("loading_screen", (percent, message) => {
 });
 
 client.on("ready", () => {
+  ultimoQr = null;
   whatsappReady = true;
 
   esperandoNuevaVinculacion = false;
@@ -482,6 +494,8 @@ client.on("disconnected", (reason) => {
 // ============================================================
 
 client.on("message", async (msg) => {
+  // Canal en pruebas: recibe QR y se conecta, pero NO contesta clientes.
+  if (!atencionAutomatica) return;
   const textoOriginal = String(msg.body || "").trim();
 
   console.log("");
@@ -538,6 +552,7 @@ client.on("message", async (msg) => {
       // Identificador estable de la conversación. Puede ser un LID.
       // El backend lo utiliza para conservar el contexto de la conversación.
       telefono: identidad.identificador,
+      ...(WA_CHANNEL_ID ? { canalWhatsapp: WA_CHANNEL_ID } : {}),
 
       // Datos comerciales reales del contacto.
       numeroWhatsapp: identidad.numeroWhatsapp ?? null,
@@ -646,6 +661,9 @@ client.on("message", async (msg) => {
       return;
     }
 
+    // En los canales nuevos no responder si el backend falló: evita mensajes
+    // fuera de contexto, especialmente tras un cierre o toma humana.
+    if (WA_DISABLE_ERROR_FALLBACK) return;
     try {
       await msg.reply(
         "Un momentito 😊 Estoy revisando tu consulta. En breve seguimos desde donde quedamos 🙌",
@@ -1764,6 +1782,97 @@ app.get("/", (req, res) => {
   });
 });
 
+function adminAutorizado(req, res, next) {
+  const crypto = require("crypto");
+  const enviada = Buffer.from(
+    String(req.headers["x-tuvendedor-internal-key"] || ""),
+  );
+  const esperada = Buffer.from(TUVENDEDOR_INTERNAL_KEY);
+  if (
+    !esperada.length ||
+    enviada.length !== esperada.length ||
+    !crypto.timingSafeEqual(enviada, esperada)
+  ) {
+    return res.status(401).json({ success: false, message: "No autorizado." });
+  }
+  next();
+}
+
+// Usado únicamente dentro de la red privada Docker por wa-manager.
+app.get("/admin/qr", adminAutorizado, (req, res) => {
+  res.json({ success: true, qr: ultimoQr, listo: whatsappReady });
+});
+app.get("/admin/estado", adminAutorizado, (req, res) => {
+  res.json({
+    success: true,
+    listo: whatsappReady,
+    numero: client.info?.wid?._serialized || null,
+    nombre: client.info?.pushname || null,
+    esperandoQr: esperandoNuevaVinculacion,
+    motivoDesconexion: ultimoMotivoDesconexion,
+    atencionAutomatica,
+  });
+});
+// Controles de seguridad del panel: pausar IA no desconecta el dispositivo.
+// No se expondrá este endpoint sin la llave interna. El administrador requiere JWT.
+app.put("/admin/attention", adminAutorizado, (req, res) => {
+  if (typeof req.body?.activo !== "boolean")
+    return res
+      .status(400)
+      .json({ success: false, message: "activo debe ser booleano" });
+  atencionAutomatica = req.body.activo;
+  return res.json({
+    success: true,
+    data: { activo: atencionAutomatica },
+    message: atencionAutomatica
+      ? "Panambí activado."
+      : "Panambí pausado. WhatsApp continúa vinculado.",
+  });
+});
+let cierreDeSesionEnCurso = false;
+app.post("/admin/logout", adminAutorizado, async (req, res) => {
+  if (cierreDeSesionEnCurso)
+    return res
+      .status(409)
+      .json({ success: false, message: "Ya se está cerrando la sesión." });
+  if (!whatsappReady)
+    return res
+      .status(409)
+      .json({
+        success: false,
+        message:
+          "El número no está conectado para cerrar sesión. Primero conectalo.",
+      });
+  cierreDeSesionEnCurso = true;
+  atencionAutomatica = false;
+  whatsappReady = false;
+  procesarMensajesDesde = null;
+  try {
+    // API oficial de whatsapp-web.js: invalida el dispositivo vinculado y
+    // deja que LocalAuth elimine la sesión de este clientId. No hacemos rm -rf.
+    await client.logout();
+    return res.json({
+      success: true,
+      message:
+        "Sesión de WhatsApp cerrada. Para volver a vincularla será necesario un nuevo QR.",
+    });
+  } catch (error) {
+    console.error(
+      "No se pudo confirmar logout de WhatsApp:",
+      error?.message || String(error),
+    );
+    return res
+      .status(503)
+      .json({
+        success: false,
+        message:
+          "WhatsApp no confirmó el cierre de sesión. Revisá el estado antes de intentar nuevamente.",
+      });
+  } finally {
+    cierreDeSesionEnCurso = false;
+  }
+});
+
 app.get("/estado", (req, res) => {
   res.status(200).json({
     whatsappReady,
@@ -1838,7 +1947,7 @@ registrarSeguimientoRoutes({
   app,
   client,
   internalKey: TUVENDEDOR_INTERNAL_KEY,
-  isReady: () => whatsappReady,
+  isReady: () => whatsappReady && atencionAutomatica,
 });
 
 const server = app.listen(PORT, "0.0.0.0", () => {

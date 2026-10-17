@@ -1,44 +1,29 @@
+# Lanzar por separado: docker compose -f docker-compose.manager.yml up -d --build
+# NO se recrea el tuvendedor_wa existente.
 services:
-
-  tuvendedor_wa:
-
+  tuvendedor_wa_manager:
     build:
       context: .
-      dockerfile: Dockerfile
-
-    container_name: tuvendedor_wa
-
+      dockerfile: Dockerfile.manager
+    container_name: tuvendedor_wa_manager
     env_file:
       - .env.production
-
     environment:
       NODE_ENV: production
-
+      WA_MANAGER_PORT: "3200"
+      TUVENDEDOR_API_URL: http://market_backend
+      WA_LEGACY_BRIDGE_URL: http://tuvendedor_wa:3100
+      WA_MANAGER_STATE_DIR: /var/lib/tuvendedor-wa-manager
     volumes:
-
-      # SESIÓN DE WHATSAPP
-      - /srv/tuvendedor/whatsapp/auth:/app/.wwebjs_auth
-
-      # CACHE
-      - /srv/tuvendedor/whatsapp/cache:/app/.wwebjs_cache
-
-    ports:
-      - "127.0.0.1:3100:3100"
-
+      # Diferente de /srv/tuvendedor/whatsapp/auth (número principal).
+      - /srv/tuvendedor/whatsapp/manager:/var/lib/tuvendedor-wa-manager
     networks:
       - ecommerce_network
-
     restart: unless-stopped
-
     init: true
-
-    shm_size: "512mb"
-
-
+    shm_size: "1gb"
+    # Sin puertos externos: el backend accede por red interna Docker.
 networks:
-
   ecommerce_network:
-
     external: true
-
     name: ecommerce_network
