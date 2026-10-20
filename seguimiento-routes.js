@@ -99,6 +99,11 @@ function registrarSeguimientoRoutes({ app, client, internalKey, isReady }) {
         });
       }
 
+      // El estado puede cambiar mientras se resuelve el identificador del contacto.
+      if (!isReady()) {
+        return res.status(503).json({success:false, message:"Canal pausado antes del envío; seguimiento no enviado."});
+      }
+
       const resultado = await client.sendMessage(chatId, mensaje);
 
       const messageId = resultado?.id?._serialized || resultado?.id?.id || null;
