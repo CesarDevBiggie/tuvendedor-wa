@@ -98,12 +98,84 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
     return true;
   }
 
+  // Acceso tolerante a serializacion camelCase/PascalCase sin alterar el contrato.
+  const campo = (objeto, camel, pascal) => objeto && typeof objeto === "object"
+    ? (objeto[camel] ?? objeto[pascal]) : undefined;
+
+  function formatoGuaranies(valor) {
+    if (valor === null || valor === undefined || valor === "") return "No disponible";
+    const numero = Number(valor);
+    if (!Number.isFinite(numero) || numero < 0) return "No disponible";
+    return Math.round(numero).toLocaleString("es-PY");
+  }
+
+  function fichaComercialWhatsApp(datos, indice, maximo) {
+    const comercial = campo(datos, "datosComerciales", "DatosComerciales");
+    const financiacion = campo(comercial, "financiacion", "Financiacion");
+    const validacion = campo(datos, "validacionComercial", "ValidacionComercial");
+    const planes = campo(financiacion, "planes", "Planes");
+    const marca = campo(datos, "marca", "Marca") || "";
+    const modelo = campo(datos, "modelo", "Modelo") || "";
+    const idModelo = campo(datos, "idModelo", "IdModelo");
+    const confianza = Number(campo(datos, "confianza", "Confianza"));
+    const lineas = [
+      `🏍️ PANAMBI SOCIAL — FOTO ${indice}/${maximo}`,
+      "✅ Moto identificada",
+      `Marca: ${marca}`,
+      `Modelo: ${modelo}`,
+      `ID del modelo: ${idModelo ?? "No disponible"}`,
+    ];
+    if (Number.isFinite(confianza) && confianza >= 0 && confianza <= 1) {
+      lineas.push(`Reconocimiento visual: ${Math.round(confianza * 100)} %`);
+    }
+    lineas.push("", "💰 INFORMACIÓN DEL CATÁLOGO");
+    if (!comercial) {
+      lineas.push("⚠️ Oferta comercial no disponible o no verificada.");
+    } else {
+      const precio = campo(comercial, "precioPublico", "PrecioPublico");
+      const contado = campo(comercial, "precioContadoFinal", "PrecioContadoFinal");
+      lineas.push(`Precio público: Gs. ${formatoGuaranies(precio)}`);
+      if (contado !== undefined && contado !== null) {
+        lineas.push(`Precio contado: Gs. ${formatoGuaranies(contado)}`);
+      }
+      const cilindrada = campo(comercial, "cilindrada", "Cilindrada");
+      if (cilindrada) lineas.push(`Cilindrada: ${cilindrada}`);
+      lineas.push("", "💳 PLANES DE FINANCIACIÓN");
+      if (Array.isArray(planes) && planes.length) {
+        for (const plan of planes.slice(0, 6)) {
+          const codigo = campo(plan, "codigoPlan", "CodigoPlan") || "Sin código";
+          const cantidad = campo(plan, "cantidadCuotas", "CantidadCuotas");
+          const importe = campo(plan, "importeCuota", "ImporteCuota");
+          const entrega = campo(plan, "entregaInicial", "EntregaInicial");
+          const parte = [`${codigo}`, cantidad ? `${cantidad} cuotas` : null,
+            `Gs. ${formatoGuaranies(importe)}`].filter(Boolean).join(" · ");
+          lineas.push(`• ${parte}`);
+          if (Number(entrega) > 0) lineas.push(`  Entrega: Gs. ${formatoGuaranies(entrega)}`);
+        }
+        if (planes.length > 6) lineas.push(`… y ${planes.length - 6} plan(es) más`);
+      } else {
+        lineas.push("Sin planes de financiación verificados.");
+      }
+      const promo = campo(financiacion, "tienePromocionVigente", "TienePromocionVigente");
+      lineas.push(promo === true ? "Promoción: informada como vigente por catálogo" :
+        "Promoción: no se confirmó una vigente en esta oferta");
+    }
+    lineas.push("", "📸 PRECIO IMPRESO EN LA IMAGEN");
+    lineas.push("Todavía no extraído ni comparado automáticamente.");
+    lineas.push("", "⚠️ VALIDACIÓN COMERCIAL");
+    const advertencia = campo(validacion, "advertencia", "Advertencia");
+    if (advertencia) lineas.push(String(advertencia));
+    else lineas.push("Revisión de imagen pendiente; no publicar con precios no verificados.");
+    lineas.push("", "🚫 No se publicó nada.");
+    return lineas.join("\n").slice(0, 3400);
+  }
+
   function resumen(lote) {
     if (!lote.fotos.length) return "Todavía no recibí imágenes. Enviá publicidades de motos.";
     const lineas = lote.fotos.map((f, i) => {
       const detalle = f.encontrada
-        ? `✅ ${f.marca} ${f.modelo} (ID ${f.idModelo})`
-        : `⚠️ Pendiente: ${f.motivo || "No identificado"}`;
+        ? `✅ ${f.marca} ${f.modelo} (ID ${f.idModelo})${f.precioPublico ? ` · Precio público Gs. ${formatoGuaranies(f.precioPublico)}` : " · oferta sin verificar"}${f.requiereRevision ? " · ⚠️ revisión comercial" : ""}`
+        : `⚠️ ${f.posibleModelo || "Modelo pendiente"}: ${f.motivo || "No identificado"}`;
       return `${i + 1}. ${detalle}`;
     });
     return `Resumen (${lote.fotos.length} imagen/es):\n${lineas.join("\n")}`.slice(0, 3400);
@@ -185,17 +257,34 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
       const datos = response.data?.data || response.data?.Data;
       if (!datos) throw new Error("API no devolvió datos de identificación");
       const encontrada = datos.encontrada === true || datos.Encontrada === true;
+      // Los nombres vienen del DTO real de identificar-foto (camelCase por ASP.NET).
+      // La imagen NO tiene cuotas extraidas aun: no afirmar coincidencia con el flyer.
+      const comercial = campo(datos, "datosComerciales", "DatosComerciales");
+      const validacion = campo(datos, "validacionComercial", "ValidacionComercial");
+      const financiacion = campo(comercial, "financiacion", "Financiacion");
+      const planes = campo(financiacion, "planes", "Planes");
+      const marcaDetectada = campo(datos, "marcaDetectada", "MarcaDetectada") ||
+        campo(campo(datos, "reconocimiento", "Reconocimiento"), "marcaDetectada", "MarcaDetectada");
+      const modeloDetectado = campo(datos, "modeloDetectado", "ModeloDetectado") ||
+        campo(campo(datos, "reconocimiento", "Reconocimiento"), "modeloDetectado", "ModeloDetectado");
       const foto = {
         encontrada,
-        marca: datos.marca || datos.Marca || "",
-        modelo: datos.modelo || datos.Modelo || "",
-        idModelo: datos.idModelo ?? datos.IdModelo ?? null,
-        motivo: datos.motivo || datos.Motivo || "Revisión requerida",
+        marca: campo(datos, "marca", "Marca") || "",
+        modelo: campo(datos, "modelo", "Modelo") || "",
+        idModelo: campo(datos, "idModelo", "IdModelo") ?? null,
+        motivo: campo(datos, "motivo", "Motivo") || "Revisión requerida",
+        posibleModelo: campo(datos, "posibleModelo", "PosibleModelo") ||
+          [marcaDetectada, modeloDetectado].filter(Boolean).join(" "),
+        precioPublico: campo(comercial, "precioPublico", "PrecioPublico"),
+        requiereRevision: !comercial ||
+          campo(validacion, "datosVerificados", "DatosVerificados") !== true ||
+          campo(validacion, "cuotaDeImagenVerificada", "CuotaDeImagenVerificada") !== true,
       };
       lote.fotos.push(foto);
+      const numeroFoto = lote.fotos.length;
       await avisar(encontrada
-        ? `✅ Identificada: ${foto.marca} ${foto.modelo} (modelo ID ${foto.idModelo}). Foto ${lote.fotos.length}/${MAX_FOTOS}. No se publicó nada.`
-        : `⚠️ Foto ${lote.fotos.length}: ${foto.motivo}. No asigné otra moto por parecido. Podés enviar otra imagen.`);
+        ? fichaComercialWhatsApp(datos, numeroFoto, MAX_FOTOS)
+        : `⚠️ Foto ${numeroFoto}/${MAX_FOTOS}: ${foto.posibleModelo || "Modelo no identificado"}\n${foto.motivo}. No asigné otra moto por parecido. No se publicó nada.`);
     } catch (error) {
       const status = error?.response?.status;
       logger.error("[PanambiSocial] Error identificando imagen:", status || error?.code || error?.message);
