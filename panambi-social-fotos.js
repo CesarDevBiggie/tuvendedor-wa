@@ -19,22 +19,56 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
   const DURACION_MS = 30 * 60 * 1000;
   const INICIO_MS = Date.now();
   const digitos = (s) => String(s || "").replace(/\D/g, "");
-  const idCanonico = (s) => String(s || "").split(":")[0];
   const telefonoPropio = () => digitos(client.info?.wid?.user);
   const propio = () => String(client.info?.wid?._serialized || "");
 
-  // Nunca tratar un mensaje dirigido a un cliente como una orden administrativa.
-  // Una coincidencia exclusiva de fromMe no es suficiente.
+  // WhatsApp Web puede representar el chat propio como @c.us o @lid.
+  // Para evitar órdenes hacia clientes, exigimos que sea un mensaje
+  // enviado por nuestra sesión Y destinado a nuestro propio chat.
   function esChatPropio(msg) {
     if (!msg?.fromMe || !client.info?.wid) return false;
+
     const identidad = propio();
-    const destino = String(msg.to || "");
+    const numero = telefonoPropio();
+    const destinatario = String(msg.to || "");
     const remoto = String(msg.id?.remote || "");
-    if (!identidad || !destino || !remoto) return false;
-    const coincide = (valor) => valor === identidad ||
-      (valor.endsWith("@c.us") && identidad.endsWith("@c.us") &&
-       idCanonico(valor) === idCanonico(identidad));
-    return coincide(destino) && coincide(remoto);
+    const origen = String(msg.from || "");
+
+    const coincideNumero = (id) => {
+      const [usuario, dominio] = id.split("@");
+      return Boolean(
+        numero && usuario &&
+        (dominio === "c.us" || dominio === "s.whatsapp.net") &&
+        digitos(usuario) === numero
+      );
+    };
+    const coincide = (id) => Boolean(id) && (
+      id === identidad || coincideNumero(id)
+    );
+
+    // Para los mensajes enviados a otros números, 'to' y 'remote'
+    // no apuntan al propio usuario: no debemos aceptar esos mensajes.
+    // Si WhatsApp no informa 'to', solamente aceptamos 'remote' propio.
+    if (destinatario) return coincide(destinatario);
+    if (remoto) return coincide(remoto);
+    // No autorizar basándose únicamente en 'fromMe' ni en 'from'.
+    return false;
+  }
+
+  function diagnosticarComando(msg) {
+    const texto = String(msg?.body || "").trim();
+    if (!/^#(?:PUBLICARMOTOS|RESUMEN|CANCELAR)$/i.test(texto)) return;
+    const presente = (valor) => Boolean(String(valor || ""));
+    logger.log("[PanambiSocial] Comando observado:", {
+      comando: texto.toUpperCase(),
+      fromMe: msg.fromMe === true,
+      tipo: msg.type,
+      haySesion: Boolean(client.info?.wid),
+      hayDestino: presente(msg.to),
+      hayRemoto: presente(msg.id?.remote),
+      chatPropio: esChatPropio(msg),
+      listo: Boolean(isReady()),
+    });
   }
 
   async function avisar(texto) {
@@ -64,6 +98,7 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
   }
 
   async function procesar(msg) {
+    diagnosticarComando(msg);
     if (!isReady() || !esChatPropio(msg)) return;
     if (Number(msg.timestamp || 0) * 1000 < INICIO_MS - 5000) return;
     if (!registrarVisto(String(msg.id?._serialized || ""))) return;
@@ -76,7 +111,7 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
     const texto = String(msg.body || "").trim();
     let lote = lotes.get(numero);
 
-    if (/^#PUBLICARMOTOS$/i.test(text) && msg.type === "chat") {
+    if (/^#PUBLICARMOTOS$/i.test(texto) && msg.type === "chat") {
       if (lote?.ocupado) return;
       lote = { inicio: ahora, fotos: [], ocupado: false };
       lotes.set(numero, lote);
@@ -89,13 +124,13 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
       await avisar("El lote venció (30 minutos). Enviá #PUBLICARMOTOS para iniciar de nuevo.");
       return;
     }
-    if (/^#CANCELAR$/i.test(text) && msg.type === "chat") {
+    if (/^#CANCELAR$/i.test(texto) && msg.type === "chat") {
       if (lote.ocupado) { await avisar("Estoy terminando la imagen actual. Reintentá #CANCELAR."); return; }
       lotes.delete(numero);
       await avisar("Lote cancelado. No se publicó nada.");
       return;
     }
-    if (/^#RESUMEN$/i.test(text) && msg.type === "chat") {
+    if (/^#RESUMEN$/i.test(texto) && msg.type === "chat") {
       await avisar(resumen(lote));
       return;
     }
