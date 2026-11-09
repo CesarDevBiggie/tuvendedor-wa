@@ -19,6 +19,10 @@ RUN npm ci --omit=dev
 # Archivos de WhatsApp y Panambi Social
 COPY app.js seguimiento-routes.js manager.js panambi-social-fotos.js ./
 
+RUN test -s /app/panambi-social-fotos.js \
+    && node --check /app/panambi-social-fotos.js \
+    && node -e "require.resolve('./panambi-social-fotos')"
+
 EXPOSE 3100 3200
 
 ENTRYPOINT ["dumb-init", "--"]
