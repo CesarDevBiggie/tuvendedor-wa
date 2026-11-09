@@ -559,7 +559,7 @@ registrarPanambiSocialFotos(client, {
   axios,
   apiUrl: TUVENDEDOR_API_URL,
   internalKey: TUVENDEDOR_INTERNAL_KEY,
-  isReady: () => whatsappReady && operativo && !cambiandoConexion,
+  isReady: () => whatsappReady && !cambiandoConexion,
 });
 
 // ============================================================
