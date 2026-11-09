@@ -15,6 +15,7 @@ const cors = require("cors");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 
 const { registrarSeguimientoRoutes } = require("./seguimiento-routes");
+const { registrarPanambiSocialFotos } = require("./panambi-social-fotos");
 
 // ============================================================
 
@@ -551,6 +552,14 @@ client.on("disconnected", (reason) => {
   // limpia. Más adelante PM2 será quien la inicie automáticamente.
 
   programarReinicio(`WhatsApp desconectado: ${motivo}`, 3000);
+});
+
+// Comandos administrativos del propio numero: aislados del chat de clientes.
+registrarPanambiSocialFotos(client, {
+  axios,
+  apiUrl: TUVENDEDOR_API_URL,
+  internalKey: TUVENDEDOR_INTERNAL_KEY,
+  isReady: () => whatsappReady && operativo && !cambiandoConexion,
 });
 
 // ============================================================
