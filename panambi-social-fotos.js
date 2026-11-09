@@ -25,37 +25,49 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
   // WhatsApp Web puede representar el chat propio como @c.us o @lid.
   // Para evitar órdenes hacia clientes, exigimos que sea un mensaje
   // enviado por nuestra sesión Y destinado a nuestro propio chat.
-  function esChatPropio(msg) {
-    if (!msg?.fromMe || !client.info?.wid) return false;
+  async function esChatPropio(msg) {
+    if (msg?.fromMe !== true || !client.info?.wid) return false;
 
     const identidad = propio();
     const numero = telefonoPropio();
-    const destinatario = String(msg.to || "");
+    const destino = String(msg.to || "");
     const remoto = String(msg.id?.remote || "");
     const origen = String(msg.from || "");
 
     const coincideNumero = (id) => {
-      const [usuario, dominio] = id.split("@");
+      const [usuario, dominio] = String(id).split("@");
       return Boolean(
         numero && usuario &&
         (dominio === "c.us" || dominio === "s.whatsapp.net") &&
         digitos(usuario) === numero
       );
     };
-    const coincide = (id) => Boolean(id) && (
-      id === identidad || coincideNumero(id)
-    );
+    const coincide = (id) => Boolean(id) && (id === identidad || coincideNumero(id));
 
-    // Para los mensajes enviados a otros números, 'to' y 'remote'
-    // no apuntan al propio usuario: no debemos aceptar esos mensajes.
-    // Si WhatsApp no informa 'to', solamente aceptamos 'remote' propio.
-    if (destinatario) return coincide(destinatario);
-    if (remoto) return coincide(remoto);
-    // No autorizar basándose únicamente en 'fromMe' ni en 'from'.
-    return false;
+    // Identidad clásica, usada en algunas versiones de WhatsApp Web.
+    if (destino && coincide(destino)) return true;
+    if (!destino && remoto && coincide(remoto)) return true;
+
+    // Un chat consigo mismo puede estar identificado como @lid.
+    // Una igualdad estricta entre remitente y destinatario, más
+    // fromMe=true, excluye los chats dirigidos a otros contactos.
+    if (origen && destino && origen === destino) return true;
+    if (!destino && origen && remoto && origen === remoto) return true;
+
+    // Si WhatsApp usa IDs diferentes (@c.us / @lid), verificar
+    // que el DESTINATARIO sea el contacto propio antes de autorizar.
+    if (destino && typeof client.getContactById === "function") {
+      try {
+        const contacto = await client.getContactById(destino);
+        if (contacto?.isMe === true) return true;
+      } catch (error) {
+        logger.warn("[PanambiSocial] No se pudo validar destino de chat propio:", error?.message);
+      }
+    }
+    return false; // Siempre falla cerrado si no logramos verificar.
   }
 
-  function diagnosticarComando(msg) {
+  async function diagnosticarComando(msg) {
     const texto = String(msg?.body || "").trim();
     if (!/^#(?:PUBLICARMOTOS|RESUMEN|CANCELAR)$/i.test(texto)) return;
     const presente = (valor) => Boolean(String(valor || ""));
@@ -66,7 +78,7 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
       haySesion: Boolean(client.info?.wid),
       hayDestino: presente(msg.to),
       hayRemoto: presente(msg.id?.remote),
-      chatPropio: esChatPropio(msg),
+      chatPropio: await esChatPropio(msg),
       listo: Boolean(isReady()),
     });
   }
@@ -98,8 +110,8 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
   }
 
   async function procesar(msg) {
-    diagnosticarComando(msg);
-    if (!isReady() || !esChatPropio(msg)) return;
+    await diagnosticarComando(msg);
+    if (!isReady() || !(await esChatPropio(msg))) return;
     if (Number(msg.timestamp || 0) * 1000 < INICIO_MS - 5000) return;
     if (!registrarVisto(String(msg.id?._serialized || ""))) return;
     const ahora = Date.now();
