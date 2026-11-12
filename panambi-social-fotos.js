@@ -1,5 +1,9 @@
 "use strict";
 
+const fs = require("node:fs/promises");
+const path = require("node:path");
+const crypto = require("node:crypto");
+
 /**
  * Panambi Social - primera etapa: identificación de publicidades desde
  * "Mensaje a ti mismo" en el WhatsApp del bridge.
@@ -15,6 +19,41 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
   const lotes = new Map();
   const vistos = new Map();
   const MAX_FOTOS = 20;
+  // Almacén privado y persistente: requiere bind mount /app/panambi-social-media.
+  // No contiene un publicador ni expone URLs de las fotografías.
+  const MEDIA_DIR = process.env.PANAMBI_SOCIAL_MEDIA_DIR || "/app/panambi-social-media";
+  const EXTENSIONES = { "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp" };
+  const carpetaLista = fs.mkdir(MEDIA_DIR, { recursive: true, mode: 0o700 });
+
+  async function guardarFlyer(media, mime) {
+    await carpetaLista;
+    const nombre = `${new Date().toISOString().slice(0, 10)}-${crypto.randomUUID()}${EXTENSIONES[mime]}`;
+    const archivo = path.join(MEDIA_DIR, nombre);
+    // Guarda los bytes del archivo recibido de WhatsApp, sin alterar colores ni texto.
+    const bytes = Buffer.from(media.data, "base64");
+    await fs.writeFile(archivo, bytes, { flag: "wx", mode: 0o600 });
+    return { archivo, nombre, sha256: crypto.createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length };
+  }
+
+  async function guardarRegistro(foto) {
+    await carpetaLista;
+    const registro = path.join(MEDIA_DIR, `${foto.flyer.nombre}.json`);
+    const contenido = {
+      nombreFlyer: foto.flyer.nombre,
+      sha256: foto.flyer.sha256,
+      tipoImagen: foto.flyer.mime,
+      fecha: new Date().toISOString(),
+      encontrada: foto.encontrada,
+      idModelo: foto.idModelo,
+      marca: foto.marca,
+      modelo: foto.modelo,
+      textoPublicacion: foto.textoPublicacion || null,
+      estado: foto.encontrada && foto.textoPublicacion ? "BORRADOR_PENDIENTE_APROBACION" : "REVISION",
+      publicado: false,
+    };
+    await fs.writeFile(registro, JSON.stringify(contenido, null, 2), { flag: "wx", mode: 0o600 });
+  }
+
   const MAX_BASE64 = 10_000_000;
   const DURACION_MS = 30 * 60 * 1000;
   const INICIO_MS = Date.now();
@@ -109,76 +148,23 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
     return Math.round(numero).toLocaleString("es-PY");
   }
 
-  function fichaComercialWhatsApp(datos, indice, maximo) {
-    const comercial = campo(datos, "datosComerciales", "DatosComerciales");
-    const financiacion = campo(comercial, "financiacion", "Financiacion");
-    const validacion = campo(datos, "validacionComercial", "ValidacionComercial");
-    const planes = campo(financiacion, "planes", "Planes");
-    const marca = campo(datos, "marca", "Marca") || "";
-    const modelo = campo(datos, "modelo", "Modelo") || "";
-    const idModelo = campo(datos, "idModelo", "IdModelo");
-    const confianza = Number(campo(datos, "confianza", "Confianza"));
-    const lineas = [
-      `🏍️ PANAMBI SOCIAL — FOTO ${indice}/${maximo}`,
-      "✅ Moto identificada",
-      `Marca: ${marca}`,
-      `Modelo: ${modelo}`,
-      `ID del modelo: ${idModelo ?? "No disponible"}`,
-    ];
-    if (Number.isFinite(confianza) && confianza >= 0 && confianza <= 1) {
-      lineas.push(`Reconocimiento visual: ${Math.round(confianza * 100)} %`);
+  function anuncioParaWhatsApp(datos, indice, maximo) {
+    const borrador = campo(datos, "borradorComercial", "BorradorComercial");
+    const texto = campo(borrador, "textoCompleto", "TextoCompleto");
+    if (typeof texto !== "string" || !texto.trim()) {
+      return `⚠️ Foto ${indice}/${maximo}: no hay oferta comercial completa para preparar el anuncio. El flyer se guardó para revisión.`;
     }
-    lineas.push("", "💰 INFORMACIÓN DEL CATÁLOGO");
-    if (!comercial) {
-      lineas.push("⚠️ Oferta comercial no disponible o no verificada.");
-    } else {
-      const precio = campo(comercial, "precioPublico", "PrecioPublico");
-      const contado = campo(comercial, "precioContadoFinal", "PrecioContadoFinal");
-      lineas.push(`Precio público: Gs. ${formatoGuaranies(precio)}`);
-      if (contado !== undefined && contado !== null) {
-        lineas.push(`Precio contado: Gs. ${formatoGuaranies(contado)}`);
-      }
-      const cilindrada = campo(comercial, "cilindrada", "Cilindrada");
-      if (cilindrada) lineas.push(`Cilindrada: ${cilindrada}`);
-      lineas.push("", "💳 PLANES DE FINANCIACIÓN");
-      if (Array.isArray(planes) && planes.length) {
-        for (const plan of planes.slice(0, 6)) {
-          const codigo = campo(plan, "codigoPlan", "CodigoPlan") || "Sin código";
-          const cantidad = campo(plan, "cantidadCuotas", "CantidadCuotas");
-          const importe = campo(plan, "importeCuota", "ImporteCuota");
-          const entrega = campo(plan, "entregaInicial", "EntregaInicial");
-          const parte = [`${codigo}`, cantidad ? `${cantidad} cuotas` : null,
-            `Gs. ${formatoGuaranies(importe)}`].filter(Boolean).join(" · ");
-          lineas.push(`• ${parte}`);
-          if (Number(entrega) > 0) lineas.push(`  Entrega: Gs. ${formatoGuaranies(entrega)}`);
-        }
-        if (planes.length > 6) lineas.push(`… y ${planes.length - 6} plan(es) más`);
-      } else {
-        lineas.push("Sin planes de financiación verificados.");
-      }
-      const promo = campo(financiacion, "tienePromocionVigente", "TienePromocionVigente");
-      lineas.push(promo === true ? "Promoción: informada como vigente por catálogo" :
-        "Promoción: no se confirmó una vigente en esta oferta");
-    }
-    lineas.push("", "📸 PRECIO IMPRESO EN LA IMAGEN");
-    lineas.push("Todavía no extraído ni comparado automáticamente.");
-    lineas.push("", "⚠️ VALIDACIÓN COMERCIAL");
-    const advertencia = campo(validacion, "advertencia", "Advertencia");
-    if (advertencia) lineas.push(String(advertencia));
-    else lineas.push("Revisión de imagen pendiente; no publicar con precios no verificados.");
-    lineas.push("", "🚫 No se publicó nada.");
-    return lineas.join("\n").slice(0, 3400);
+    // El texto comercial ya lo construyó el backend con precios del catálogo.
+    // IDs, diagnósticos, confianza y comparaciones quedan fuera del anuncio.
+    return `📸 PUBLICACIÓN ${indice}/${maximo} — VISTA PREVIA\n\n${texto.trim()}\n\n🖼️ Imagen: flyer original recibido.\n📝 Borrador pendiente de tu aprobación. No se publicó nada.`;
   }
 
   function resumen(lote) {
     if (!lote.fotos.length) return "Todavía no recibí imágenes. Enviá publicidades de motos.";
-    const lineas = lote.fotos.map((f, i) => {
-      const detalle = f.encontrada
-        ? `✅ ${f.marca} ${f.modelo} (ID ${f.idModelo})${f.precioPublico ? ` · Precio público Gs. ${formatoGuaranies(f.precioPublico)}` : " · oferta sin verificar"}${f.requiereRevision ? " · ⚠️ revisión comercial" : ""}`
-        : `⚠️ ${f.posibleModelo || "Modelo pendiente"}: ${f.motivo || "No identificado"}`;
-      return `${i + 1}. ${detalle}`;
-    });
-    return `Resumen (${lote.fotos.length} imagen/es):\n${lineas.join("\n")}`.slice(0, 3400);
+    const lineas = lote.fotos.map((f, i) =>
+      `${i + 1}. ${f.encontrada && f.textoPublicacion ? "📝" : "⚠️"} ${[f.marca, f.modelo].filter(Boolean).join(" ") || f.posibleModelo || "Pendiente"} — ${f.encontrada && f.textoPublicacion ? "borrador preparado" : "requiere revisión"}`
+    );
+    return `Resumen de ${lote.fotos.length} flyer(s):\n${lineas.join("\n")}\n\nLos flyers originales y sus borradores se guardaron en el servidor. No se publicó nada.`.slice(0, 3400);
   }
 
   async function procesar(msg) {
@@ -228,6 +214,7 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
       return;
     }
     lote.ocupado = true;
+    let flyerGuardado = null;
     try {
       if (!internalKey || !apiUrl) throw new Error("API interna no configurada");
       const media = await msg.downloadMedia();
@@ -241,6 +228,9 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
         await avisar("Imagen demasiado grande. Enviá una versión de menor tamaño.");
         return;
       }
+      // La imagen se conserva antes del análisis, incluso si Ollama falla.
+      const flyer = await guardarFlyer(media, mime);
+      flyerGuardado = flyer;
       const response = await axios.post(
         `${String(apiUrl).replace(/\/$/, "")}/api/internal/panambi-social/identificar-foto`,
         { numeroWhatsapp: numero, mediaMimeType: mime, mediaBase64: media.data },
@@ -267,7 +257,11 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
         campo(campo(datos, "reconocimiento", "Reconocimiento"), "marcaDetectada", "MarcaDetectada");
       const modeloDetectado = campo(datos, "modeloDetectado", "ModeloDetectado") ||
         campo(campo(datos, "reconocimiento", "Reconocimiento"), "modeloDetectado", "ModeloDetectado");
+      const borrador = campo(datos, "borradorComercial", "BorradorComercial");
+      const textoPublicacion = campo(borrador, "textoCompleto", "TextoCompleto");
       const foto = {
+        flyer: { ...flyer, mime },
+        textoPublicacion: typeof textoPublicacion === "string" ? textoPublicacion : null,
         encontrada,
         marca: campo(datos, "marca", "Marca") || "",
         modelo: campo(datos, "modelo", "Modelo") || "",
@@ -280,10 +274,11 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
           campo(validacion, "datosVerificados", "DatosVerificados") !== true ||
           campo(validacion, "cuotaDeImagenVerificada", "CuotaDeImagenVerificada") !== true,
       };
+      await guardarRegistro(foto);
       lote.fotos.push(foto);
       const numeroFoto = lote.fotos.length;
       await avisar(encontrada
-        ? fichaComercialWhatsApp(datos, numeroFoto, MAX_FOTOS)
+        ? anuncioParaWhatsApp(datos, numeroFoto, MAX_FOTOS)
         : `⚠️ Foto ${numeroFoto}/${MAX_FOTOS}: ${foto.posibleModelo || "Modelo no identificado"}\n${foto.motivo}. No asigné otra moto por parecido. No se publicó nada.`);
     } catch (error) {
       const status = error?.response?.status;
@@ -291,6 +286,7 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
       const detalle = status === 403 ? "Número propio no autorizado en PanambiSocial:AllowedPhones del backend." :
         status === 401 ? "La clave interna del bridge no coincide con la API." :
         "Fallo de identificación (Ollama o API). Revisá logs; no se publicó nada.";
+      if (flyerGuardado) logger.warn("[PanambiSocial] Flyer conservado para revisión:", flyerGuardado.nombre);
       await avisar(`❌ ${detalle}`);
     } finally {
       lote.ocupado = false;
