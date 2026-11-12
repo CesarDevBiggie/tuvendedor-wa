@@ -1,3 +1,4 @@
+
 # ÚNICO compose de TuVendedor WhatsApp: principal + multicanal.
 # IMPORTANTE: mantener .env.production existente, sin sobrescribir ni divulgar.
 # IMPORTANTE: el auth principal sigue exactamente en el volumen de producción original.
@@ -22,6 +23,9 @@ services:
     volumes:
       - /srv/tuvendedor/whatsapp/auth:/app/.wwebjs_auth
       - /srv/tuvendedor/whatsapp/cache:/app/.wwebjs_cache
+
+      # PANAMBI SOCIAL - Flyers originales y borradores persistentes
+      - /srv/tuvendedor/whatsapp/panambi-social-media:/app/panambi-social-media
 
     ports:
       - "127.0.0.1:3100:3100"
