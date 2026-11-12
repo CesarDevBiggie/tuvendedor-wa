@@ -150,7 +150,10 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
 
   function anuncioParaWhatsApp(datos, indice, maximo) {
     const borrador = campo(datos, "borradorComercial", "BorradorComercial");
-    const texto = campo(borrador, "textoCompleto", "TextoCompleto");
+    const textoPublico = campo(borrador, "textoCompleto", "TextoCompleto");
+    const textoWhatsApp = campo(borrador, "textoWhatsApp", "TextoWhatsApp");
+    const texto = typeof textoWhatsApp === "string" && textoWhatsApp.trim()
+      ? textoWhatsApp : textoPublico;
     if (typeof texto !== "string" || !texto.trim()) {
       return `⚠️ Foto ${indice}/${maximo}: no hay oferta comercial completa para preparar el anuncio. El flyer se guardó para revisión.`;
     }
