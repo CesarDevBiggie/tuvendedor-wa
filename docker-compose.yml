@@ -1,9 +1,18 @@
-
-# ÚNICO compose de TuVendedor WhatsApp: principal + multicanal.
-# IMPORTANTE: mantener .env.production existente, sin sobrescribir ni divulgar.
-# IMPORTANTE: el auth principal sigue exactamente en el volumen de producción original.
+# =========================================================
+# TUVENDEDOR WHATSAPP
+# Principal + Multicanal + Panambi Social
+# =========================================================
+#
+# IMPORTANTE:
+# - Mantener .env.production existente.
+# - No modificar ni eliminar los volumenes de autenticacion.
+# - No ejecutar docker compose down -v.
+# =========================================================
 
 services:
+  # =========================================================
+  # WHATSAPP PRINCIPAL - PANAMBI SOCIAL
+  # =========================================================
   tuvendedor_wa:
     build:
       context: .
@@ -18,13 +27,23 @@ services:
     environment:
       NODE_ENV: production
       WA_DISABLE_ERROR_FALLBACK: "true"
+
+      # =======================================================
+      # PANAMBI SOCIAL
+      # =======================================================
       PANAMBI_SOCIAL_ENABLED: "true"
 
+      # Habilita los nuevos comandos de Meta en WhatsApp
+      PANAMBI_META_COMMAND_ENABLED: "true"
+
     volumes:
+      # Sesion principal de WhatsApp
       - /srv/tuvendedor/whatsapp/auth:/app/.wwebjs_auth
+
+      # Cache de WhatsApp
       - /srv/tuvendedor/whatsapp/cache:/app/.wwebjs_cache
 
-      # PANAMBI SOCIAL - Flyers originales y borradores persistentes
+      # Flyers originales y borradores persistentes
       - /srv/tuvendedor/whatsapp/panambi-social-media:/app/panambi-social-media
 
     ports:
@@ -37,6 +56,9 @@ services:
     init: true
     shm_size: "512mb"
 
+  # =========================================================
+  # WHATSAPP MANAGER - MULTICANAL
+  # =========================================================
   tuvendedor_wa_manager:
     image: tuvendedor-wa:unificado-20261017
     container_name: tuvendedor_wa_manager
@@ -57,7 +79,7 @@ services:
       TUVENDEDOR_API_URL: http://market_backend
 
     volumes:
-      # Independiente de las credenciales del principal.
+      # Independiente de las credenciales del principal
       - /srv/tuvendedor/whatsapp/manager:/var/lib/tuvendedor-wa-manager
 
     networks:
@@ -67,8 +89,12 @@ services:
     init: true
     shm_size: "1gb"
 
-    # Sin ports: solo accesible desde la red privada de Docker.
+    # Sin puertos publicos.
+    # Accesible solamente desde la red Docker.
 
+# =========================================================
+# REDES
+# =========================================================
 networks:
   ecommerce_network:
     external: true
