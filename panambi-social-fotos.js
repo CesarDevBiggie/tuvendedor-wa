@@ -300,7 +300,7 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
             "Content-Type": "application/json",
             "X-TuVendedor-Internal-Key": internalKey,
           },
-          timeout: 145000,
+          timeout: 270000,
           maxBodyLength: 12_000_000,
           maxContentLength: 2_000_000,
         }
