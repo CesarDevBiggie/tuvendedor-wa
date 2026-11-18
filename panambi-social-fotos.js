@@ -7,7 +7,7 @@ const crypto = require("node:crypto");
 /**
  * Panambi Social - primera etapa: identificación de publicidades desde
  * "Mensaje a ti mismo" en el WhatsApp del bridge.
- * No publica en Meta, ni escribe en la base de datos.
+ * Publica en Meta solamente mediante #PUBLICAR y habilitación explícita en el backend.
  */
 function registrarPanambiSocialFotos(client, opciones = {}) {
   const { axios, apiUrl, internalKey, isReady = () => true, logger = console } = opciones;
@@ -17,6 +17,7 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
   }
 
   const lotes = new Map();
+  const PUBLICACION_ACTIVA = process.env.PANAMBI_META_COMMAND_ENABLED === "true";
   const vistos = new Map();
   const MAX_FOTOS = 20;
   // Almacén privado y persistente: requiere bind mount /app/panambi-social-media.
@@ -52,6 +53,15 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
       publicado: false,
     };
     await fs.writeFile(registro, JSON.stringify(contenido, null, 2), { flag: "wx", mode: 0o600 });
+  }
+
+  async function actualizarRegistro(foto, estado, resultados = null) {
+    const registro = path.join(MEDIA_DIR, `${foto.flyer.nombre}.json`);
+    const contenido = JSON.parse(await fs.readFile(registro, "utf8"));
+    contenido.estado = estado;
+    contenido.publicado = estado === "PUBLICADO";
+    if (resultados) contenido.resultadosMeta = resultados;
+    await fs.writeFile(registro, JSON.stringify(contenido, null, 2), { mode: 0o600 });
   }
 
   const MAX_BASE64 = 10_000_000;
@@ -108,7 +118,7 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
 
   async function diagnosticarComando(msg) {
     const texto = String(msg?.body || "").trim();
-    if (!/^#(?:PUBLICARMOTOS|RESUMEN|CANCELAR)$/i.test(texto)) return;
+    if (!/^#(?:PUBLICARMOTOS|RESUMEN|SIMULAR|PUBLICAR|CANCELAR)$/i.test(texto)) return;
     const presente = (valor) => Boolean(String(valor || ""));
     logger.log("[PanambiSocial] Comando observado:", {
       comando: texto.toUpperCase(),
@@ -167,7 +177,7 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
     const lineas = lote.fotos.map((f, i) =>
       `${i + 1}. ${f.encontrada && f.textoPublicacion ? "📝" : "⚠️"} ${[f.marca, f.modelo].filter(Boolean).join(" ") || f.posibleModelo || "Pendiente"} — ${f.encontrada && f.textoPublicacion ? "borrador preparado" : "requiere revisión"}`
     );
-    return `Resumen de ${lote.fotos.length} flyer(s):\n${lineas.join("\n")}\n\nLos flyers originales y sus borradores se guardaron en el servidor. No se publicó nada.`.slice(0, 3400);
+    return `Resumen de ${lote.fotos.length} flyer(s):\n${lineas.join("\n")}\n\nLos flyers originales y borradores están guardados. No se publicó nada.\n⚠️ Revisá manualmente precios y cuotas impresos en los flyers; esa comparación no está automatizada.\n${PUBLICACION_ACTIVA ? "Probá #SIMULAR. Para aprobar los importes y publicar definitivamente, enviá #PUBLICAR." : "Publicación WhatsApp todavía deshabilitada."}`.slice(0, 3400);
   }
 
   async function procesar(msg) {
@@ -186,7 +196,7 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
 
     if (/^#PUBLICARMOTOS$/i.test(texto) && msg.type === "chat") {
       if (lote?.ocupado) return;
-      lote = { inicio: ahora, fotos: [], ocupado: false };
+      lote = { inicio: ahora, fotos: [], ocupado: false, resumido: false, publicando: false, ejecutado: false };
       lotes.set(numero, lote);
       await avisar("Modo reconocimiento ACTIVADO. Enviá las fotos publicitarias, una por una, sin escribir los modelos. Al terminar, enviá #RESUMEN. #CANCELAR descarta el lote. No se publica nada.");
       return;
@@ -204,7 +214,55 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
       return;
     }
     if (/^#RESUMEN$/i.test(texto) && msg.type === "chat") {
+      lote.resumido = true;
       await avisar(resumen(lote));
+      return;
+    }
+    if (/^#(?:SIMULAR|PUBLICAR)$/i.test(texto) && msg.type === "chat") {
+      const simulacion = /^#SIMULAR$/i.test(texto);
+      if (!PUBLICACION_ACTIVA) { await avisar("Publicador deshabilitado en el bridge. No se publicó nada."); return; }
+      if (lote.ocupado || lote.publicando) { await avisar("El lote está ocupado; no se envió otra publicación."); return; }
+      if (lote.ejecutado) { await avisar("Este lote ya fue procesado. No repetiré publicaciones. Iniciá otro con #PUBLICARMOTOS."); return; }
+      if (!lote.resumido) { await avisar("Primero revisá el lote mediante #RESUMEN. No se publicó nada."); return; }
+      if (!lote.fotos.length || lote.fotos.some(f => !f.encontrada || !f.textoPublicacion || f.textoPublicacion.length > 2200)) {
+        await avisar("El lote tiene imágenes sin identificación o textos inválidos. No se publicó nada. Usá #CANCELAR.");
+        return;
+      }
+      lote.publicando = true;
+      if (!simulacion) lote.ejecutado = true; // Bloquear repeticiones, incluso cuando falle Meta.
+      try {
+        for (let i = 0; i < lote.fotos.length; i++) {
+          const foto = lote.fotos[i];
+          // Reservar la operación en disco antes de contactar servicios externos.
+          if (!simulacion) await actualizarRegistro(foto, "PUBLICACION_INICIADA_VERIFICAR_SI_FALLA");
+          if (foto.flyer.mime !== "image/jpeg") {
+            if (!simulacion) await actualizarRegistro(foto, "ERROR_FORMATO_JPEG_REQUERIDO");
+            await avisar(`❌ Flyer ${i + 1}: Instagram requiere JPEG. No se publicó esta imagen.`);
+            continue;
+          }
+          const bytes = await fs.readFile(foto.flyer.archivo);
+          const headers = { "X-TuVendedor-Internal-Key": internalKey, "Content-Type": "application/json" };
+          const base = String(apiUrl).replace(/\/$/, "");
+          const media = await axios.post(`${base}/api/internal/panambi-social/media`, {
+            numeroWhatsapp: numero, mediaBase64: bytes.toString("base64")
+          }, { headers, timeout: 45000, maxBodyLength: 11_000_000 });
+          const imagenUrl = media.data?.imagenUrl;
+          if (!imagenUrl) throw new Error("El backend no devolvió URL pública del flyer.");
+          const respuesta = await axios.post(`${base}/api/internal/panambi-social/publicar-meta`, {
+            numeroWhatsapp: numero, imagenUrl, texto: foto.textoPublicacion,
+            facebook: true, instagram: true, simulacion, confirmacion: simulacion ? "" : "PUBLICAR"
+          }, { headers, timeout: 120000 });
+          const resultados = respuesta.data?.resultados || [];
+          const estado = resultados.length === 2 && resultados.every(r => r.exito === true) ? "PUBLICADO" : "PARCIAL_VERIFICAR";
+          if (!simulacion) await actualizarRegistro(foto, estado, resultados);
+          await avisar(simulacion ? `🧪 Simulación ${i + 1}/${lote.fotos.length}: el backend aceptó el borrador. No se publicó nada. URL del flyer: ${imagenUrl}` : `Flyer ${i + 1}/${lote.fotos.length}: ${resultados.map(r => `${r.red}: ${r.exito ? "✅ publicado" : "❌ error"}${r.idPublicacion ? ` (${r.idPublicacion})` : ""}`).join(" | ") || "Sin resultados"}.`);
+        }
+      } catch (error) {
+        logger.error("[PanambiSocial] Publicación interrumpida:", error?.response?.status || error?.message);
+        await avisar("⚠️ Publicación interrumpida. Puede haberse publicado en alguna red. Verificá Facebook e Instagram antes de volver a intentar. Este lote está bloqueado para evitar duplicados.");
+      } finally {
+        lote.publicando = false;
+      }
       return;
     }
     if (msg.type !== "image") return;
@@ -301,7 +359,7 @@ function registrarPanambiSocialFotos(client, opciones = {}) {
       logger.error("[PanambiSocial] Error inesperado:", error?.message || String(error));
     });
   });
-  logger.log("[PanambiSocial] Listener administrativo preparado. Solo chat propio; sin publicaciones.");
+  logger.log("[PanambiSocial] Listener preparado. Publicación por comando:", PUBLICACION_ACTIVA);
 }
 
 module.exports = { registrarPanambiSocialFotos };
